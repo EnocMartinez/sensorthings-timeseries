@@ -175,7 +175,7 @@ def process_sensorthings_options(request):
         "top": 100,
         "skip": 0,
         "filter": "",
-        "orderBy": "resultTime asc"
+        "orderBy": "order by timestamp asc"
     }
     params = request.args.to_dict()
 
@@ -248,7 +248,7 @@ if __name__ == "__main__":
     argparser.add_argument("-v", "--verbose", action="store_true", help="Shows verbose output", default=False)
     argparser.add_argument("-s", "--secrets", help="File with sensible conf parameters", type=str,
                            default="secrets.json")
-    argparser.add_argument("-u", "--url", help="url that will be used", type=str, default="http://localhost:5000/api")
+    argparser.add_argument("-u", "--url", help="url that will be used", type=str, default="https://data.obsea.es/api")
     args = argparser.parse_args()
 
     with open(args.secrets) as f:
@@ -264,5 +264,5 @@ if __name__ == "__main__":
                                  log)
     log.info("Getting sensor list...")
 
-    app.run(debug=True)
+    app.run(host="0.0.0.0", debug=False)
 

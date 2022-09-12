@@ -36,11 +36,10 @@ def get_sta_request(request):
     return text, code
 
 
-@app.route('/<path:path>', methods=['GET'])
-def generic(path):
+@app.route('/', methods=['GET'])
+def generic():
     text, code = get_sta_request(request)
     return Response(text, code, mimetype='application/json')
-
 
 @app.route('/Observations(<int:observation_id>)', methods=['GET'])
 def observations(observation_id):

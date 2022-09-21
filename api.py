@@ -24,8 +24,60 @@ import requests
 from flask import Flask, request, jsonify, Response
 from common import setup_log, SensorthingsDbConnector, GRN, RST, RED, YEL, CYN
 import time
+import psycopg2
 
 app = Flask(__name__)
+
+
+@app.route('/<path:path>', methods=['GET'])
+def generic_query(path):
+    text, code = get_sta_request(request)
+    return Response(text, code, mimetype='application/json')
+
+
+@app.route('/Sensors(<int:sensor_id>)/Datastreams(<int:datastream_id>)/Observations', methods=['GET'])
+def sensors_datastreams_observations(sensor_id, datastream_id):
+    return datastreams_observations(datastream_id)
+
+
+@app.route('/Datastreams(<int:datastream_id>)/Observations', methods=['GET'])
+def datastreams_observations(datastream_id):
+    try:
+        opts = process_sensorthings_options(request)
+        log.debug(f"Received Observations GET: {opts['full_path']}")
+
+        if db.is_raw_datastream(datastream_id):
+            init = time.time()
+            foi_id = db.datastream_fois[datastream_id]
+            pinit = time.time()
+            list_data = db.get_raw_data(datastream_id, top=opts["top"], skip=opts["skip"], debug=True, format="list",
+                                        filters=opts["filter"], orderby=opts["orderBy"])
+            log.debug(f"{CYN}Get data from database took {time.time() - pinit:.03} seconds{RST}")
+            text = data_list_to_sensorthings(list_data, foi_id, datastream_id, opts)
+            log.debug(f"{CYN}Raw data query total time (with {len(list_data)} points) took {time.time() - init:.03} seconds{RST}")
+            return Response(json.dumps(text), status=200, mimetype='application/json')
+        else:
+            init = time.time()
+            text, code = get_sta_request(request)
+            d = json.loads(text)
+            log.debug(f"{CYN}Regular SensorThings query (with {len(d['value'])} points) took {time.time() - init:.03} seconds{RST}")
+            return Response(text, code, mimetype='application/json')
+    except SyntaxError as e:
+        error_message = {
+            "code": 400,
+            "type": "error",
+            "message": str(e)
+        }
+        return Response(json.dumps(error_message), 400, mimetype='application/json')
+    except psycopg2.errors.InFailedSqlTransaction as db_error:
+        error_message = {
+            "code": 500,
+            "type": "error",
+            "message": f"Internal database connector error: {db_error}"
+        }
+        db.connection.rollback()
+        return Response(json.dumps(error_message), 500, mimetype='application/json')
+
 
 def get_sta_request(request):
     sta_url = f"{sta_base_url}{request.full_path}"
@@ -149,7 +201,9 @@ def sta_option_to_posgresql(filter_string):
         # map SensorThings params with raw_data table params
         "phenomenonTime": "timestamp", "resultTime": "timestamp", "result": "value",
         # order
-        "orderBy": "order by"
+        "orderBy": "order by",
+        # manually change resultQuality/qc_flag to qc_flag
+        "resultQuality/qc_flag": "qc_flag"
     }
 
     for i in range(len(elements)):
@@ -202,44 +256,9 @@ def process_sensorthings_options(request):
         elif key == "$orderBy":
             sta_opts["orderBy"] = "order by " + sta_option_to_posgresql(params["$orderBy"])
 
-
     return sta_opts
 
 
-@app.route('/Sensors(<int:sensor_id>)/Datastreams(<int:datastream_id>)/Observations', methods=['GET'])
-def sensors_datastreams_observations(sensor_id, datastream_id):
-    return datastreams_observations(datastream_id)
-
-
-@app.route('/Datastreams(<int:datastream_id>)/Observations', methods=['GET'])
-def datastreams_observations(datastream_id):
-    try:
-        opts = process_sensorthings_options(request)
-        log.debug(f"Received Observations GET: {opts['full_path']}")
-
-        if db.is_raw_datastream(datastream_id):
-            init = time.time()
-            foi_id = db.datastream_fois[datastream_id]
-            pinit = time.time()
-            list_data = db.get_raw_data(datastream_id, top=opts["top"], skip=opts["skip"], debug=True, format="list",
-                                        filters=opts["filter"], orderby=opts["orderBy"])
-            log.debug(f"{CYN}Get data from database took {time.time() - pinit:.03} seconds{RST}")
-            text = data_list_to_sensorthings(list_data, foi_id, datastream_id, opts)
-            log.debug(f"{CYN}Raw data query total time (with {len(list_data)} points) took {time.time() - init:.03} seconds{RST}")
-            return Response(json.dumps(text), status=200, mimetype='application/json')
-        else:
-            init = time.time()
-            text, code = get_sta_request(request)
-            d = json.loads(text)
-            log.debug(f"{CYN}Regular SensorThings query with {len(d['value'])} points took {time.time() - init:.03} seconds{RST}")
-            return Response(text, code, mimetype='application/json')
-    except SyntaxError as e:
-        error_message = {
-            "code": 400,
-            "type": "error",
-            "message": str(e)
-        }
-        return Response(json.dumps(error_message), 400, mimetype='application/json')
 
 
 if __name__ == "__main__":
@@ -256,12 +275,17 @@ if __name__ == "__main__":
     sta_base_url = secrets["sensorThings"]["url"]
     service_url = args.url
     log = setup_log("API", logger_name="API")
+
+    log.info(f"Service URL: {service_url}")
+    log.info(f"SensorThings URL: {sta_base_url}")
+
     if args.verbose:
         log.setLevel(logging.DEBUG)
+        log.debug("Setting log to DEBUG level")
     log.info("Setting up db connector")
     db = SensorthingsDbConnector(dbconf["host"], dbconf["port"], dbconf["name"], dbconf["user"], dbconf["password"],
                                  log)
     log.info("Getting sensor list...")
 
-    app.run(host="0.0.0.0", debug=False)
+    app.run(host="0.0.0.0", debug=True)
 

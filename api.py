@@ -307,7 +307,7 @@ def observations(observation_id):
             timestamp = time.strftime('%Y-%m-%dT%H:%M:%Sz', struct_time)
             filters = f"timestamp = '{timestamp}'"
             data = db.get_raw_data(datastream_id, filters=filters, debug=True, format="list")[0]
-            observation = data_point_to_sensorthings(data, observation_id, datastream_id, opts)
+            observation = data_point_to_sensorthings(data, datastream_id, opts)
             return Response(json.dumps(observation), 200, mimetype='application/json')
     except SyntaxError as e:
         error_message = {
@@ -331,7 +331,7 @@ def observations_from_raw_dataframe(df, datastream: dict):
     df.values.tolist()
 
 
-def data_point_to_sensorthings(data_point: list, observation_id: int, datastream_id: int, opts):
+def data_point_to_sensorthings(data_point: list, datastream_id: int, opts):
     base_url = args.url
     foi_id = db.datastream_fois[datastream_id]
     timestamp, value, qc_flag = data_point
@@ -413,7 +413,7 @@ def format_observation_list(data_list, foi_id: int, datastream_id: int, opts: di
     p = time.time()
     observations_list = []
     for data_point in data_list:
-        observations_list.append(data_point_to_sensorthings(data_point, foi_id, datastream_id, opts))
+        observations_list.append(data_point_to_sensorthings(data_point, datastream_id, opts))
     log.debug(f"{CYN}format db data took {time.time() - p:.03} seconds{RST}")
     return observations_list
 
@@ -489,7 +489,7 @@ def process_sensorthings_options(params: dict):
                 raise SyntaxError("True or False exepcted, got \"{params['$count']}\"")
 
         elif key == "$select":
-            sta_opts["select"] = params["$select"].split(",")
+            sta_opts["select"] = params["$select"].replace("resultQuality/qc_flag", "resultQuality").split(",")
 
         elif key == "$filter":
             sta_opts["filter"] = sta_option_to_posgresql(params["$filter"])

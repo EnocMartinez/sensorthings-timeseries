@@ -431,6 +431,7 @@ class SensorthingsDbConnector(PgDatabaseConnector, LoggerSuperclass):
                 self.obs_properties_ids = self.get_obs_properties()
                 self.things_ids = self.get_things()
                 self.datastream_fois = self.get_datastream_fois()
+                self.foi_datastream = reverse_dictionary(self.datastream_fois)
 
                 keep_trying = False
             except ConnectionError as e:

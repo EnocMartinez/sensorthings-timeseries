@@ -290,8 +290,8 @@ def get_sta_request(request):
 @app.route('/', methods=['GET'])
 def generic():
     text, code = get_sta_request(request)
-    opts = process_sensorthings_options(request.full_path)
-    return process_sensorthings_response(request, json.loads(text), sta_opts=opts)
+    opts = process_sensorthings_options(request.args.to_dict())
+    return process_sensorthings_response(request, json.loads(text))
 
 
 @app.route('/Observations(<int:observation_id>)', methods=['GET'])

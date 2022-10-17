@@ -84,7 +84,7 @@ def parse_options_within_expand(expand_string):
                         end = i
                         break
             if end < 0:
-                raise ValueError("Could not parse optionts!")
+                raise ValueError("Could not parse options!")
             nested_expand = rest[:i + 1]
             rich.print(f"Nested expand string='{nested_expand}'")
 
@@ -93,11 +93,14 @@ def parse_options_within_expand(expand_string):
         expand_string = expand_string.replace("$expand=" + nested_expand, "").replace(";;", ";")  # delete nested expand
         opts["$expand"] = nested_expand
 
-    for pairs in expand_string.split(";"):
-        if len(pairs) > 0:
-            rich.print(f"my pair is \"{pairs}\"")
-            key, value = pairs.split("=")
-            opts[key] = value
+    rich.print(f"[yellow]Expanding string '{expand_string}'")
+    if "$" in expand_string:
+        for pairs in expand_string.split(";"):
+            rich.print(f"[cyan]Processing pair {pairs}")
+            if len(pairs) > 0:
+                rich.print(f"my pair is \"{pairs}\"")
+                key, value = pairs.split("=")
+                opts[key] = value
 
     return opts
 

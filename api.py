@@ -429,6 +429,9 @@ def is_date(s):
     """
     if len(s) > 19 and s[4] == "-" and s[7] == "-" and s[10] == "T" and s[13] == ":" and s[16] == ":":
         return True
+
+    elif len(s) == 10 and s[4] == "-" and s[7] == "-": # check pure date (YYYY-mm-dd)
+        return True
     return False
 
 
@@ -452,11 +455,24 @@ def sta_option_to_posgresql(filter_string):
     }
 
     for i in range(len(elements)):
-        if is_date(elements[i]):  # check if it is a date
-            elements[i] = f"'{elements[i]}'"  # add ' around date
-        for old, new in sta_to_pg_conversions.items():
-            if old == elements[i]:
-                elements[i] = new
+        if ")" and "(" in elements[i]:  # trapped within a function, like 'date(phenomenonTime)'
+            string = elements[i].split("(")[1].split(")")[0]  # process only contents of function
+            trapped = True
+        else:
+            trapped = False
+            string = elements[i]  # process whole element
+
+        if is_date(string):  # check if it is a date
+            string = f"'{string}'"  # add ' around date)
+
+        for old, new in sta_to_pg_conversions.items():  # total match
+            if old == string:
+                string = new
+
+        if trapped:  # trapped within a function
+            elements[i] = elements[i].split("(")[0] + f"({string})"  # recreate the function with new string
+        else:
+            elements[i] = string
 
     return " ".join(elements)
 
@@ -519,7 +535,9 @@ if __name__ == "__main__":
     dbconf = secrets["sensorThings"]["databaseConnectors"]["readOnly"]
     sta_base_url = secrets["sensorThings"]["url"]
     service_url = args.url
-    log = setup_log("API", logger_name="API")
+    log = setup_log("API", logger_name="API", log_level="info")
+    if args.verbose:
+        log.setLevel(logging.DEBUG)
 
     log.info(f"Service URL: {service_url}")
     log.info(f"SensorThings URL: {sta_base_url}")

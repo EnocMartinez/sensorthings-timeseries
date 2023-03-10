@@ -6,7 +6,7 @@ This project contains an API designed to allow the use of SensorThings API with 
 ### Info ###
 
 * **author**: Enoc Martínez
-* **version**: v0.1
+* **version**: v0.2
 * **contributors**: Enoc Martínez 
 * **organization**: Universitat Politècnica de Catalunya (UPC)
 * **contact**: enoc.martinez@upc.edu

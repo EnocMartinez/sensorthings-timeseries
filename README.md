@@ -1,29 +1,12 @@
 # README #
 
-This README would normally document whatever steps are necessary to get your application up and running.
+This project contains an API designed to allow the use of SensorThings API with large amount of raw data stored in a separated table (FROST Server implementation). It acts as an middleware between the user and the SensorThings API, deciding if a request has to be forwarded to the service or if it has to be handled internally.
 
-### What is this repository for? ###
 
-* Quick summary
-* Version
-* [Learn Markdown](https://bitbucket.org/tutorials/markdowndemo)
+### Info ###
 
-### How do I get set up? ###
-
-* Summary of set up
-* Configuration
-* Dependencies
-* Database configuration
-* How to run tests
-* Deployment instructions
-
-### Contribution guidelines ###
-
-* Writing tests
-* Code review
-* Other guidelines
-
-### Who do I talk to? ###
-
-* Repo owner or admin
-* Other community or team contact
+* **author**: Enoc Martínez
+* **version**: v0.1
+* **contributors**: Enoc Martínez 
+* **organization**: Universitat Politècnica de Catalunya (UPC)
+* **contact**: enoc.martinez@upc.edu

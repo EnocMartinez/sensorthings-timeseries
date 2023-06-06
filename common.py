@@ -340,6 +340,7 @@ class Connection:
         self.last_used = -1
 
         self.index = 0
+        self.__closing = False
 
     def run_query(self, query, description=False, debug=False):
         """
@@ -358,7 +359,14 @@ class Connection:
         return resp
 
     def close(self):
-        self.connection.close()
+        if not self.__closing:
+            self.__closing = True
+            rich.print(f"[cyan]Closing connection {id(self)}")
+            self.connection.close()
+        else:
+            rich.print(f"[red]Someone else is closing {id(self)}!")
+
+
 
 
 class PgDatabaseConnector(LoggerSuperclass):
@@ -394,7 +402,6 @@ class PgDatabaseConnector(LoggerSuperclass):
         for i in range(len(self.connections)):
             c = self.connections[i]
             if c.available:
-                rich.print(f"[purple]------> using connection {i}")
                 return c
 
         while len(self.connections) >= self.max_connections:
@@ -701,7 +708,7 @@ class SensorthingsDbConnector(PgDatabaseConnector, LoggerSuperclass):
         if filters:
             query += f" and {filters} "  # add custom filters
         query += ";"
-        return self.list_from_query(query, debug=True)[0][0]
+        return self.list_from_query(query, debug=False)[0][0]
 
     def get_raw_data(self, identifier, time_start="", time_end="", top=100, skip=0, ascending=True, debug=False,
                      format="dataframe", filters="", orderby=""):
@@ -721,7 +728,6 @@ class SensorthingsDbConnector(PgDatabaseConnector, LoggerSuperclass):
             query += f" and {filters} "  # add custom filters
 
         if time_start:
-            rich.print("[red] YES!")
             query += f" and timestamp >= '{time_start}'"
         if time_end:
             query += f" and timestamp <'{time_end}'"

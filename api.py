@@ -6,7 +6,7 @@ trying to access data in raw_data table, the API accesses this data throuh a Pos
 and sends it back following the SensorThings API standard.
 
 Some of the things to be taken into account:
-    -> there are no observation ID in raw data, but a primary key composed by timestamp and datastream_id
+        -> there are no observation ID in raw data, but a primary key composed by timestamp and datastream_id
     -> To generate a unique identifier for each data point, the following formula is used:
             observation_id = datastream_id * 1e10 + epoch_time
 
@@ -26,7 +26,6 @@ from flask import Flask, request, jsonify, Response
 from common import setup_log, SensorthingsDbConnector, GRN, RST, RED, YEL, CYN
 import time
 import psycopg2
-import rich
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -66,7 +65,6 @@ def parse_options_within_expand(expand_string):
     # check if we have a nested expand
     if "$expand" in expand_string:
         nested = True
-        rich.print("[yellow]nested $expand detected")
         start = expand_string.find("$expand=") + len("$expand=")
         rest = expand_string[start:]
         if "(" not in rest:
@@ -86,19 +84,14 @@ def parse_options_within_expand(expand_string):
             if end < 0:
                 raise ValueError("Could not parse options!")
             nested_expand = rest[:i + 1]
-            rich.print(f"Nested expand string='{nested_expand}'")
 
     if nested:
-        rich.print(f"[green]Extracting options from {expand_string}")
         expand_string = expand_string.replace("$expand=" + nested_expand, "").replace(";;", ";")  # delete nested expand
         opts["$expand"] = nested_expand
 
-    rich.print(f"[yellow]Expanding string '{expand_string}'")
     if "$" in expand_string:
         for pairs in expand_string.split(";"):
-            rich.print(f"[cyan]Processing pair {pairs}")
             if len(pairs) > 0:
-                rich.print(f"my pair is \"{pairs}\"")
                 key, value = pairs.split("=")
                 opts[key] = value
 
@@ -130,32 +123,25 @@ def expand_element(resp, parent_element, expanding_key, opts):
         datastream = resp
         datastream_id = get_datastream_id(datastream)
         foi_id = db.datastream_fois[datastream_id]
-        rich.print(f"[blue]Datastream_id={datastream_id}")
 
     elif parent_element == "FeatureOfInterest":
         foi_id = get_foi_id(resp)
         datastream_id = db.datastream_fois(foi_id)
 
     if db.is_raw_datastream(datastream_id):
-        rich.print(f"[magenta]    Expanding Datastream {db.datastream_names[datastream_id]}")
         opts = process_sensorthings_options(opts)  # from "raw" options to processed ones
 
-        list_data = db.get_raw_data(datastream_id, top=opts["top"], skip=opts["skip"], debug=True, format="list",
+        list_data = db.get_raw_data(datastream_id, top=opts["top"], skip=opts["skip"], debug=False, format="list",
                                     filters=opts["filter"], orderby=opts["orderBy"])
         observation_list = format_observation_list(list_data, foi_id, datastream_id, opts)
         datastream["Observations@iot.nextLink"] = generate_next_link(len(list_data), opts, datastream_id)
         datastream["Observations@iot.navigatioinLink"] = args.url + f"/Datastreams({datastream_id})/Observations"
         datastream["Observations"] = observation_list
 
-    else:
-        rich.print("Regular datastream, no need to expand anything...")
-
     return resp
 
 
 def expand_query(resp, parent_element, expanding_key, opts):
-    rich.print(f"[green]Expanding {expanding_key}")
-
     # list response, expand one by one
     if "value" in resp.keys() and type(resp["value"]) == list:
         for i in range(len(resp["value"])):
@@ -168,7 +154,6 @@ def expand_query(resp, parent_element, expanding_key, opts):
         resp = expand_element(resp, parent_element, expanding_key, opts)
 
     if "$expand" in opts.keys():
-        rich.print(f"[cyan]Expanding nested expand! {opts['$expand']}")
         nested_options = parse_options_within_expand(opts["$expand"])
         nested_expanding_key = get_expand_value(opts["$expand"])
 
@@ -176,10 +161,8 @@ def expand_query(resp, parent_element, expanding_key, opts):
             # Expand every element within the list
             for i in range(len(resp[expanding_key])):
                 element_to_expand = resp[expanding_key][i]
-                rich.print("before:", element_to_expand)
                 nested_response = expand_query(element_to_expand, expanding_key, nested_expanding_key, nested_options)
                 resp[expanding_key][i] = nested_response
-                rich.print("after:", nested_response)
 
         elif type(resp[expanding_key]) == dict:
             element_to_expand = resp[expanding_key]
@@ -194,14 +177,8 @@ def process_sensorthings_response(request, resp: json, mimetype="aplication/json
     process the resopnse and checks if further actions are needed (e.g. expand raw data).
     """
     opts = process_sensorthings_options(request.args.to_dict())
-    rich.print("[cyan]Checking if further actions are needed...")
-
     if "expand" in opts.keys():
-        rich.print("[green]Expand detected!")
-        rich.print(f"URL '{request.full_path}'")
-        rich.print(f"Expand options {opts['expand']}")
         parent, key, expand_opts = process_url_with_expand(request.full_path, opts)
-        rich.print(f"===> Expanding {parent}->{key} with options {json.dumps(expand_opts)}")
         resp = expand_query(resp, parent, key, expand_opts)
 
     return Response(json.dumps(resp), status=200, mimetype="application/json")
@@ -213,12 +190,11 @@ def decode_expand_options(expand_string: str):
     """
     if "(" not in expand_string:
         return {}
-    rich.print("Remove sorrounding paranthesis")
     expand_string = expand_string.split("(")[1]
     if expand_string[-1] == ")":
         expand_string = expand_string[:-1]
     if "$expand" in expand_string:
-        raise ValueError("UNimplemented!")
+        raise ValueError("Unimplemented!")
     options = {}
     for option in expand_string.split(";"):
         key, value = option.split("=")
@@ -246,7 +222,7 @@ def datastreams_observations(datastream_id):
             init = time.time()
             foi_id = db.datastream_fois[datastream_id]
             pinit = time.time()
-            list_data = db.get_raw_data(datastream_id, top=opts["top"], skip=opts["skip"], debug=True, format="list",
+            list_data = db.get_raw_data(datastream_id, top=opts["top"], skip=opts["skip"], debug=False, format="list",
                                         filters=opts["filter"], orderby=opts["orderBy"])
             log.debug(f"{CYN}Get data from database took {time.time() - pinit:.03} seconds{RST}")
             text = data_list_to_sensorthings(list_data, foi_id, datastream_id, opts)
@@ -269,6 +245,7 @@ def datastreams_observations(datastream_id):
         return Response(json.dumps(error_message), 400, mimetype='application/json')
 
     except psycopg2.errors.InFailedSqlTransaction as db_error:
+        log.error(RED + "psycopg2.errors.InFailedSqlTransaction" + RST)
         error_message = {
             "code": 500,
             "type": "error",
@@ -389,7 +366,6 @@ def generate_next_link(n: int, opts: dict, datastream_id: int, url: str = ""):
     :param url: base url to modify, if not set a datastream(xx)/Observations url will be generated
     """
     if url:
-        rich.print(f"[green]Using exsiting url {url}")
         next_link = url
     else:
         next_link = args.url + f"/Datastreams({datastream_id})/Observations"
@@ -398,10 +374,8 @@ def generate_next_link(n: int, opts: dict, datastream_id: int, url: str = ""):
         next_link += "?"  # add a ending ?
 
     if "$skip" in next_link:
-        rich.print(f"[green]Skip present")
         next_link = next_link.replace(f"$skip={opts['skip']}", f"$skip={opts['skip'] + opts['top']}")
     else:
-        rich.print(f"[magenta]Adding skip to '{next_link}'")
         next_link = next_link.replace(f"?", f"?$skip={opts['top']}&")
     if n < opts["top"]:
         return ""
@@ -550,4 +524,4 @@ if __name__ == "__main__":
                                  log)
     log.info("Getting sensor list...")
 
-    app.run(host="0.0.0.0", debug=True)
+    app.run(host="0.0.0.0", debug=False)

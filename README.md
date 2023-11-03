@@ -19,7 +19,7 @@ The SensorThings TimeSeries API provides transparent access to SensorThings data
                                    └───────────────► (PostgresQL +    │
                                    queries with    │  TimescaleDB)    │
                                    timeseries data └──────────────────┘
-                                   (postgresq-)
+                                   (postgresql)
 
 
 ```

@@ -2,7 +2,7 @@ version: '3'
 services:
   sensorthings-timeseries:
     container_name: sta-ts
-    image: enocmartinez/sensorthings-timeseries:v0.2.1
+    image: enocmartinez/sensorthings-timeseries:v0.2.1-alpine
     ports:
       - "3000:3000"
     environment:

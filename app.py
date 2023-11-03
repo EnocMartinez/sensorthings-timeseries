@@ -22,13 +22,14 @@ from argparse import ArgumentParser
 import logging
 import json
 import requests
-from flask import Flask, request, jsonify, Response
-from common import setup_log, SensorthingsDbConnector, GRN, RST, RED, YEL, CYN
+from flask import Flask, request, Response
+from common import setup_log, SensorthingsDbConnector
 import time
 import psycopg2
 from flask_cors import CORS
+import os
 
-app = Flask(__name__)
+app = Flask("SensorThings TimeSeries")
 CORS(app)
 
 
@@ -245,7 +246,7 @@ def datastreams_observations(datastream_id):
         return Response(json.dumps(error_message), 400, mimetype='application/json')
 
     except psycopg2.errors.InFailedSqlTransaction as db_error:
-        log.error(RED + "psycopg2.errors.InFailedSqlTransaction" + RST)
+        log.error("psycopg2.errors.InFailedSqlTransaction" )
         error_message = {
             "code": 500,
             "type": "error",
@@ -497,31 +498,37 @@ def process_sensorthings_options(params: dict):
 
 
 if __name__ == "__main__":
-    argparser = ArgumentParser()
-    argparser.add_argument("-v", "--verbose", action="store_true", help="Shows verbose output", default=False)
-    argparser.add_argument("-s", "--secrets", help="File with sensible conf parameters", type=str,
-                           default="secrets.json")
-    argparser.add_argument("-u", "--url", help="url that will be used", type=str, default="http://localhost:5000")
-    args = argparser.parse_args()
+    required_env_variables = ["STA_DB_HOST", "STA_DB_USER", "STA_DB_PORT", "STA_DB_PASSWORD", "STA_DB_NAME", "STA_URL",
+                              "STA_TS_ROOT_URL"]
+    for key in required_env_variables:
+        if key not in os.environ.keys():
+            raise EnvironmentError(f"Environment variable '{key}' not set!")
 
-    with open(args.secrets) as f:
-        secrets = json.load(f)
-    dbconf = secrets["sensorThings"]["databaseConnectors"]["readOnly"]
-    sta_base_url = secrets["sensorThings"]["url"]
-    service_url = args.url
     log = setup_log("API", logger_name="API", log_level="info")
-    if args.verbose:
+
+    db_name = os.environ["STA_DB_NAME"]
+    db_port = os.environ["STA_DB_PORT"]
+    db_user = os.environ["STA_DB_USER"]
+    db_password = os.environ["STA_DB_PASSWORD"]
+    db_host = os.environ["STA_DB_HOST"]
+    service_url = os.environ["STA_TS_ROOT_URL"]
+    sta_base_url = os.environ["STA_URL"]
+
+    if "STA_TS_RAW_DATA_TABLE" not in os.environ.keys():
+        raw_data_table = "raw_data"
+    else:
+        raw_data_table = os.environ["STA_TS_RAW_DATA_TABLE"]
+
+
+    if "STA_TS_DEBUG" in os.environ.keys():
         log.setLevel(logging.DEBUG)
+        log.debug("Setting log to DEBUG level")
+
 
     log.info(f"Service URL: {service_url}")
     log.info(f"SensorThings URL: {sta_base_url}")
 
-    if args.verbose:
-        log.setLevel(logging.DEBUG)
-        log.debug("Setting log to DEBUG level")
     log.info("Setting up db connector")
-    db = SensorthingsDbConnector(dbconf["host"], dbconf["port"], dbconf["name"], dbconf["user"], dbconf["password"],
-                                 log)
+    db = SensorthingsDbConnector(db_host, db_port, db_name, db_user, db_password, log, raw_data_table=raw_data_table)
     log.info("Getting sensor list...")
-
-    app.run(host="0.0.0.0", debug=False)
+    app.run(host="0.0.0.0", debug=False, port=3000)

@@ -459,7 +459,7 @@ class PgDatabaseConnector(LoggerSuperclass):
 
 
 class SensorthingsDbConnector(PgDatabaseConnector, LoggerSuperclass):
-    def __init__(self, host, port, db_name, db_user, db_password, logger, keep_trying=True):
+    def __init__(self, host, port, db_name, db_user, db_password, logger, keep_trying=True, raw_data_table="raw_data"):
         """
         initializes  DB connector specific for SensorThings API database (FROST implementation)
         :param host:

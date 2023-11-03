@@ -1,0 +1,23 @@
+version: '3'
+services:
+  sensorthings-timeseries:
+    container_name: sta-ts
+    image: enocmartinez/sensorthings-timeseries:v0.2.1-alpine
+    ports:
+      - "3000:3000"
+    environment:
+      # Variables to connect with external SensorThings Database
+      - "STA_URL=http://172.17.0.1:8080/FROST-Server/v1.1"
+      - "STA_DB_NAME=sensorthings"
+      - "STA_DB_USER=sensorthings"
+      - "STA_DB_HOST=172.17.0.1"
+      - "STA_DB_PORT=5432"
+      - "STA_DB_PASSWORD=ChangeMe"
+      - "STA_TS_ROOT_URL=http://localhost:3000"
+
+    healthcheck:
+      test: curl --fail http://localhost:3000/Sensors || exit 1
+      interval: 60s
+      retries: 1
+      timeout: 2s
+    restart: unless-stopped

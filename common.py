@@ -323,6 +323,52 @@ class UdpDispatcher(GenericThread):
             time.sleep(3)
 
 
+class Connection:
+    def __init__(self, host, port, db_name, db_user, db_password, timeout):
+        self.__host = host
+        self.__port = port
+        self.__name = db_name
+        self.__user = db_user
+        self.__pwd = db_password
+        self.__timeout = timeout
+
+        self.available = True  # flag that determines if this connection is available or not
+        # Create a connection
+        self.connection = psycopg2.connect(host=self.__host, port=self.__port, dbname=self.__name, user=self.__user,
+                                           password=self.__pwd, connect_timeout=self.__timeout)
+        self.cursor = self.connection.cursor()
+        self.last_used = -1
+
+        self.index = 0
+        self.__closing = False
+
+    def run_query(self, query, description=False, debug=False):
+        """
+        Executes a query and returns the result. If description=True the desription will also be returned
+        """
+        self.available = False
+        if debug:
+            rich.print("[magenta]%s" % query)
+        self.cursor.execute(query)
+        self.connection.commit()
+        resp = self.cursor.fetchall()
+        self.available = True
+
+        if description:
+            return resp, self.cursor.description
+        return resp
+
+    def close(self):
+        if not self.__closing:
+            self.__closing = True
+            rich.print(f"[cyan]Closing connection {id(self)}")
+            self.connection.close()
+        else:
+            rich.print(f"[red]Someone else is closing {id(self)}!")
+
+
+
+
 class PgDatabaseConnector(LoggerSuperclass):
     """
     Interface to access a PostgresQL database
@@ -336,46 +382,53 @@ class PgDatabaseConnector(LoggerSuperclass):
         self.__user = db_user
         self.__pwd = db_password
         self.__timeout = timeout
-        self.connection = None
-        self.cursor = None
 
         self.query_time = -1  # stores here the execution time of the last query
         self.db_initialized = False
-        self.init_db()
+        self.connections = []  # list of connections, starts with one
+        self.max_connections = 50
 
-    def init_db(self):
+    def new_connection(self) -> Connection:
+        c = Connection(self.__host, self.__port, self.__name, self.__user, self.__pwd, self.__timeout)
+        self.connections.append(c)
+        return c
+
+    def get_available_connection(self):
+        """
+        Loops through the connections and gets the first available. If there isn't any available create a new one (or
+        wait if connections reached the limit).
+        """
+
+        for i in range(len(self.connections)):
+            c = self.connections[i]
+            if c.available:
+                return c
+
+        while len(self.connections) >= self.max_connections:
+            time.sleep(0.5)
+            self.debug("waiting for conn")
+
+        self.info(f"Creating DB connection {len(self.connections)}..")
+        return self.new_connection()
+
+
+    def exec_query(self, query, description=False, debug=False):
+        """
+        Runs a query in a free connection
+        """
+        c = self.get_available_connection()
+        results = None
         try:
-            self.connection = psycopg2.connect(host=self.__host, port=self.__port, dbname=self.__name, user=self.__user,
-                                               password=self.__pwd, connect_timeout=self.__timeout)
-            self.cursor = self.connection.cursor()
-            self.db_initialized = True
+            results = c.run_query(query, description=description, debug=debug)
         except Exception as e:
-            self.error("Can't initialize the database!")
-            self.error(f"Exception {e.__class__.__name__}: {e}")
-            self.db_initialized = False
-            return self.db_initialized
+            rich.print(f"[red]{e}")
+            try:
+                c.close()
+            except:  # ignore errors
+                pass
+            self.connections.remove(c)
+        return results
 
-        return self.db_initialized
-
-    def exec_query(self, query, debug=False):
-        """
-        Wrapper to query with psycopg2
-        :param cursor: DB cursor
-        :param query as string
-        :returns nothing
-        """
-        if not self.db_initialized:
-            self.warning("Database is not initialized!, trying to open connection...")
-            if not self.init_db():
-                raise ConnectionError("Database not initialized!")
-            self.info("Database initialized!")
-
-        if debug:
-            rich.print("[magenta]%s" % query)
-        init = time.time()
-        self.cursor.execute(query)
-        self.connection.commit()
-        self.query_time = time.time() - init
 
     def list_from_query(self, query, debug=False):
         """
@@ -385,8 +438,7 @@ class PgDatabaseConnector(LoggerSuperclass):
         :param debug:
         :returns list with the query result
         """
-        self.exec_query(query, debug=debug)
-        return self.cursor.fetchall()
+        return self.exec_query(query, debug=debug)
 
     def dataframe_from_query(self, query, debug=False):
         """
@@ -397,17 +449,17 @@ class PgDatabaseConnector(LoggerSuperclass):
         :param debug:
         :returns DataFrame with the query result
         """
-        self.exec_query(query, debug=debug)
-        response = self.cursor.fetchall()
-        colnames = [desc[0] for desc in self.cursor.description]  # Get the Column names
+        response, description = self.exec_query(query, debug=debug, description=True)
+        colnames = [desc[0] for desc in description]  # Get the Column names
         return pd.DataFrame(response, columns=colnames)
 
     def close(self):
-        self.connection.close()
+        for c in self.connections:
+            c.close()
 
 
 class SensorthingsDbConnector(PgDatabaseConnector, LoggerSuperclass):
-    def __init__(self, host, port, db_name, db_user, db_password, logger, keep_trying=True):
+    def __init__(self, host, port, db_name, db_user, db_password, logger, keep_trying=True, raw_data_table="raw_data"):
         """
         initializes  DB connector specific for SensorThings API database (FROST implementation)
         :param host:
@@ -656,7 +708,7 @@ class SensorthingsDbConnector(PgDatabaseConnector, LoggerSuperclass):
         if filters:
             query += f" and {filters} "  # add custom filters
         query += ";"
-        return self.list_from_query(query, debug=True)[0][0]
+        return self.list_from_query(query, debug=False)[0][0]
 
     def get_raw_data(self, identifier, time_start="", time_end="", top=100, skip=0, ascending=True, debug=False,
                      format="dataframe", filters="", orderby=""):
@@ -676,7 +728,6 @@ class SensorthingsDbConnector(PgDatabaseConnector, LoggerSuperclass):
             query += f" and {filters} "  # add custom filters
 
         if time_start:
-            rich.print("[red] YES!")
             query += f" and timestamp >= '{time_start}'"
         if time_end:
             query += f" and timestamp <'{time_end}'"

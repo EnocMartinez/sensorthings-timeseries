@@ -1,29 +1,34 @@
-# README #
+# SensorThings TimeSeries #
 
-This README would normally document whatever steps are necessary to get your application up and running.
 
-### What is this repository for? ###
+SensorThings TimeSeries is an API that is designed to complement the SensorThings API ([FROST Implementation](https://github.com/FraunhoferIOSB/FROST-Server)) with efficient storage for large amounts of time-series data with [TimescaleDB](https://timescaledb.com). SensorThings TimeSeries provides an API to access to data stored in a TimescaleDB hypertable called `raw_data` and returns it to the users.
 
-* Quick summary
-* Version
-* [Learn Markdown](https://bitbucket.org/tutorials/markdowndemo)
+The SensorThings TimeSeries API provides transparent access to SensorThings data, while adding support to access huge amount of timeseries data. This approach has the benefits of saving lots of hard drive space and to speed up queries retrieving great amounts of data.
 
-### How do I get set up? ###
+```
+                ┌──────────────┐                   ┌──────────────────┐
+                │              │                   │                  │
+      o   ──────► SensorThings ├───────────────────► SensorThings API │
+     -|-        │  TimeSeires  │   regular queries │  (FROST Server)  │
+     / \        │              ├───┐   (http)      │                  │
+                └──────────────┘   │               └──────────────────┘
+   (user)                          │
+                                   │
+                                   │               ┌──────────────────┐
+                                   │               │ SensorThings DB  │
+                                   └───────────────► (PostgresQL +    │
+                                   queries with    │  TimescaleDB)    │
+                                   timeseries data └──────────────────┘
+                                   (postgresql)
 
-* Summary of set up
-* Configuration
-* Dependencies
-* Database configuration
-* How to run tests
-* Deployment instructions
 
-### Contribution guidelines ###
+```
 
-* Writing tests
-* Code review
-* Other guidelines
 
-### Who do I talk to? ###
+### Info ###
 
-* Repo owner or admin
-* Other community or team contact
+* **author**: Enoc Martínez
+* **version**: v0.2.1
+* **contributors**: Enoc Martínez 
+* **organization**: Universitat Politècnica de Catalunya (UPC)
+* **contact**: enoc.martinez@upc.edu

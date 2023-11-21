@@ -28,6 +28,8 @@ import time
 import psycopg2
 from flask_cors import CORS
 import os
+from common import GRN, BLU, MAG, CYN, WHT, YEL, RED, NRM, RST
+import rich
 
 app = Flask("SensorThings TimeSeries")
 CORS(app)
@@ -136,7 +138,7 @@ def expand_element(resp, parent_element, expanding_key, opts):
                                     filters=opts["filter"], orderby=opts["orderBy"])
         observation_list = format_observation_list(list_data, foi_id, datastream_id, opts)
         datastream["Observations@iot.nextLink"] = generate_next_link(len(list_data), opts, datastream_id)
-        datastream["Observations@iot.navigatioinLink"] = args.url + f"/Datastreams({datastream_id})/Observations"
+        datastream["Observations@iot.navigatioinLink"] = sta_base_url + f"/Datastreams({datastream_id})/Observations"
         datastream["Observations"] = observation_list
 
     return resp
@@ -225,6 +227,7 @@ def datastreams_observations(datastream_id):
             pinit = time.time()
             list_data = db.get_raw_data(datastream_id, top=opts["top"], skip=opts["skip"], debug=False, format="list",
                                         filters=opts["filter"], orderby=opts["orderBy"])
+            rich.print(list_data)
             log.debug(f"{CYN}Get data from database took {time.time() - pinit:.03} seconds{RST}")
             text = data_list_to_sensorthings(list_data, foi_id, datastream_id, opts)
             log.debug(
@@ -313,7 +316,7 @@ def observations_from_raw_dataframe(df, datastream: dict):
 
 
 def data_point_to_sensorthings(data_point: list, datastream_id: int, opts):
-    base_url = args.url
+    base_url = sta_base_url
     foi_id = db.datastream_fois[datastream_id]
     timestamp, value, qc_flag = data_point
     t = timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -369,7 +372,7 @@ def generate_next_link(n: int, opts: dict, datastream_id: int, url: str = ""):
     if url:
         next_link = url
     else:
-        next_link = args.url + f"/Datastreams({datastream_id})/Observations"
+        next_link = sta_base_url + f"/Datastreams({datastream_id})/Observations"
 
     if "?" not in next_link:
         next_link += "?"  # add a ending ?

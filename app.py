@@ -122,20 +122,27 @@ def expand_element(resp, parent_element, expanding_key, opts):
     if expanding_key != "Observations":  # we should only worry about expanding observations
         return resp
 
-    if parent_element == "Datastreams":
+    if parent_element.startswith("Datastreams"):
         datastream = resp
         datastream_id = get_datastream_id(datastream)
         foi_id = db.datastream_fois[datastream_id]
 
-    elif parent_element == "FeatureOfInterest":
+    elif parent_element.startswith("FeaturesOfInterest"):
         foi_id = get_foi_id(resp)
         datastream_id = db.datastream_fois(foi_id)
+    else:
+        raise ValueError(f"Unexpected parent element '{parent_element}'")
 
-    if db.is_raw_datastream(datastream_id):
+    data_type, average = db.get_data_type(datastream_id)
+    if not average:  # If not average, data may need to be expanded
         opts = process_sensorthings_options(opts)  # from "raw" options to processed ones
+        if data_type == "timeseries":
+            list_data = db.get_timeseries_data(datastream_id, top=opts["top"], skip=opts["skip"], debug=False, format="list",
+                                        filters=opts["filter"], orderby=opts["orderBy"])
+        elif data_type == "profiles":
+            list_data = db.get_profiles_data(datastream_id, top=opts["top"], skip=opts["skip"], debug=False, format="list",
+                                        filters=opts["filter"], orderby=opts["orderBy"])
 
-        list_data = db.get_raw_data(datastream_id, top=opts["top"], skip=opts["skip"], debug=False, format="list",
-                                    filters=opts["filter"], orderby=opts["orderBy"])
         observation_list = format_observation_list(list_data, foi_id, datastream_id, opts)
         datastream["Observations@iot.nextLink"] = generate_next_link(len(list_data), opts, datastream_id)
         datastream["Observations@iot.navigatioinLink"] = sta_base_url + f"/Datastreams({datastream_id})/Observations"
@@ -184,7 +191,7 @@ def process_sensorthings_response(request, resp: json, mimetype="aplication/json
         parent, key, expand_opts = process_url_with_expand(request.full_path, opts)
         resp = expand_query(resp, parent, key, expand_opts)
 
-    return Response(json.dumps(resp), status=200, mimetype="application/json")
+    return generate_response(json.dumps(resp), status=200, mimetype="application/json")
 
 
 def decode_expand_options(expand_string: str):
@@ -205,120 +212,31 @@ def decode_expand_options(expand_string: str):
     return options
 
 
-@app.route('/<path:path>', methods=['GET'])
-def generic_query(path):
-    text, code = get_sta_request(request)
-    resp = json.loads(text)
-    return process_sensorthings_response(request, resp)
-
-
-@app.route('/Sensors(<int:sensor_id>)/Datastreams(<int:datastream_id>)/Observations', methods=['GET'])
-def sensors_datastreams_observations(sensor_id, datastream_id):
-    return datastreams_observations(datastream_id)
-
-
-@app.route('/Datastreams(<int:datastream_id>)/Observations', methods=['GET'])
-def datastreams_observations(datastream_id):
-    try:
-        opts = process_sensorthings_options(request.args.to_dict())
-        if db.is_raw_datastream(datastream_id):
-            init = time.time()
-            foi_id = db.datastream_fois[datastream_id]
-            pinit = time.time()
-            list_data = db.get_raw_data(datastream_id, top=opts["top"], skip=opts["skip"], debug=False, format="list",
-                                        filters=opts["filter"], orderby=opts["orderBy"])
-            rich.print(list_data)
-            log.debug(f"{CYN}Get data from database took {time.time() - pinit:.03} seconds{RST}")
-            text = data_list_to_sensorthings(list_data, foi_id, datastream_id, opts)
-            log.debug(
-                f"{CYN}Raw data query total time (with {len(list_data)} points) took {time.time() - init:.03} seconds{RST}")
-            return Response(json.dumps(text), status=200, mimetype='application/json')
-        else:
-            init = time.time()
-            text, code = get_sta_request(request)
-            d = json.loads(text)
-            log.debug(
-                f"{CYN}Regular SensorThings query (with {len(d['value'])} points) took {time.time() - init:.03} seconds{RST}")
-            return process_sensorthings_response(request, json.loads(text))
-    except SyntaxError as e:
-        error_message = {
-            "code": 400,
-            "type": "error",
-            "message": str(e)
-        }
-        return Response(json.dumps(error_message), 400, mimetype='application/json')
-
-    except psycopg2.errors.InFailedSqlTransaction as db_error:
-        log.error("psycopg2.errors.InFailedSqlTransaction" )
-        error_message = {
-            "code": 500,
-            "type": "error",
-            "message": f"Internal database connector error: {db_error}"
-        }
-        db.connection.rollback()
-        return Response(json.dumps(error_message), 500, mimetype='application/json')
-
-
 def get_sta_request(request):
     sta_url = f"{sta_base_url}{request.full_path}"
-    log.debug(f"Generic query, fetching {sta_url}")
+    log.debug(f"[blue]Generic query, fetching {sta_url}")
     resp = requests.get(sta_url)
+    rich.print(f"[yellow]Getting STA: {sta_url}")
     code = resp.status_code
     text = resp.text.replace(sta_base_url, service_url)  # hide original URL
     return text, code
 
 
-@app.route('/', methods=['GET'])
-def generic():
-    text, code = get_sta_request(request)
-    opts = process_sensorthings_options(request.args.to_dict())
-    return process_sensorthings_response(request, json.loads(text))
-
-
-@app.route('/Observations(<int:observation_id>)', methods=['GET'])
-def observations(observation_id):
-    try:
-        full_path = request.full_path
-        opts = process_sensorthings_options(request.args.to_dict())
-
-        log.info(f"Received Observations GET: {full_path}")
-        if observation_id < 1e10:
-            text, code = get_sta_request(request)
-            return process_sensorthings_response(request, json.loads(text), sta_opts=opts)
-        else:
-            datastream_id = int(observation_id / 1e10)
-            struct_time = time.localtime(observation_id - 1e10 * datastream_id)
-            timestamp = time.strftime('%Y-%m-%dT%H:%M:%Sz', struct_time)
-            filters = f"timestamp = '{timestamp}'"
-            data = db.get_raw_data(datastream_id, filters=filters, debug=True, format="list")[0]
-            observation = data_point_to_sensorthings(data, datastream_id, opts)
-            return Response(json.dumps(observation), 200, mimetype='application/json')
-    except SyntaxError as e:
-        error_message = {
-            "code": 400,
-            "type": "error",
-            "message": str(e)
-        }
-        return Response(json.dumps(error_message), 400, mimetype='application/json')
-
-
-@app.after_request
-def add_cors_headers(response):
-    response.headers.add('access-control-allow-origin', '*')
-    return response
-
-
 def observations_from_raw_dataframe(df, datastream: dict):
     df["resultTime"] = df.index.strftime("%Y-%m-%dT%H:%M:%Sz")
     df = df[["resultTime", "value", "qc_flag"]]
-
     df.values.tolist()
 
-
-def data_point_to_sensorthings(data_point: list, datastream_id: int, opts):
+def data_point_to_sensorthings(data_point: list, datastream_id: int, opts, data_type: str):
     base_url = sta_base_url
     foi_id = db.datastream_fois[datastream_id]
-    timestamp, value, qc_flag = data_point
+
+    if data_type == "timeseries":
+        timestamp, value, qc_flag = data_point
+    elif data_type == "profiles":
+        timestamp, depth, value, qc_flag = data_point
+    else:
+        raise ValueError("unimplemented")
     t = timestamp.strftime("%Y-%m-%dT%H:%M:%SZ")
     observation_id = int(1e10 * datastream_id + int(timestamp.strftime("%s")))
     observation = {
@@ -326,13 +244,17 @@ def data_point_to_sensorthings(data_point: list, datastream_id: int, opts):
         "phenomenonTime": t,
         "result": value,
         "resultTime": t,
-        "resultQuality": {
-            "qc_flag": qc_flag
-        },
         "@iot.selfLink": f"{base_url}/Observations({observation_id})",
         "Datastream@iot.navigationLink": f"{base_url}/Datastreams({int(datastream_id)})",
         "FeatureOfInterest@iot.navigationLink": f"{base_url}/FeaturesOfInterest({int(foi_id)})"
     }
+    if data_type == "profiles" or data_type == "timeseries":
+        observation["resultQuality"] = {
+            "qc_flag": qc_flag
+        }
+    if data_type == "profiles":   # add depth in profiles
+        observation["parameters"] = {"depth": depth}
+
     if "select" in opts.keys():
         for key in observation.copy().keys():
             if key not in opts["select"]:
@@ -340,7 +262,7 @@ def data_point_to_sensorthings(data_point: list, datastream_id: int, opts):
     return observation
 
 
-def data_list_to_sensorthings(data_list, foi_id: int, datastream_id: int, opts: dict):
+def data_list_to_sensorthings(data_list, foi_id: int, datastream_id: int, opts: dict, data_type: str):
     """
     Generates a list Observations structure, such as
         {
@@ -349,15 +271,15 @@ def data_list_to_sensorthings(data_list, foi_id: int, datastream_id: int, opts: 
                 {observation 1...},
                 {observation 2 ...}
                 ...
-            }
+            ]
+         }
     """
-    n = len(data_list)
     data = {}
     next_link = generate_next_link(len(data_list), opts, datastream_id, url=request.url)
     if next_link:
         data["@iot.nextLink"] = next_link
 
-    data["value"] = format_observation_list(data_list, foi_id, datastream_id, opts)
+    data["value"] = format_observation_list(data_list, foi_id, datastream_id, opts, data_type)
     return data
 
 
@@ -387,14 +309,15 @@ def generate_next_link(n: int, opts: dict, datastream_id: int, url: str = ""):
     return next_link
 
 
-def format_observation_list(data_list, foi_id: int, datastream_id: int, opts: dict):
+def format_observation_list(data_list, foi_id: int, datastream_id: int, opts: dict, data_type: str):
     """
     Formats a list of observations into a list
     """
     p = time.time()
     observations_list = []
     for data_point in data_list:
-        observations_list.append(data_point_to_sensorthings(data_point, datastream_id, opts))
+        o = data_point_to_sensorthings(data_point, datastream_id, opts, data_type)
+        observations_list.append(o)
     log.debug(f"{CYN}format db data took {time.time() - p:.03} seconds{RST}")
     return observations_list
 
@@ -413,7 +336,7 @@ def is_date(s):
     return False
 
 
-def sta_option_to_posgresql(filter_string):
+def sta_option_to_postgresql(filter_string):
     """
     Takes a SensorThings API filter expression and converts it to a PostgresQL filter expression
     :param filter_string: sensorthings filter expression e.g. filter=phenomenonTime lt 2020-01-01T00:00:00z
@@ -429,7 +352,9 @@ def sta_option_to_posgresql(filter_string):
         # order
         "orderBy": "order by",
         # manually change resultQuality/qc_flag to qc_flag
-        "resultQuality/qc_flag": "qc_flag"
+        "resultQuality/qc_flag": "qc_flag",
+        # manually change parameters/depth to depth
+        "parameters/depth": "depth"
     }
 
     for i in range(len(elements)):
@@ -464,6 +389,7 @@ def process_sensorthings_options(params: dict):
     """
     __valid_options = ["$top", "$skip", "$count", "$select", "$filter", "$orderBy", "$expand"]
     sta_opts = {
+        "count": True,
         "top": 100,
         "skip": 0,
         "filter": "",
@@ -489,15 +415,142 @@ def process_sensorthings_options(params: dict):
             sta_opts["select"] = params["$select"].replace("resultQuality/qc_flag", "resultQuality").split(",")
 
         elif key == "$filter":
-            sta_opts["filter"] = sta_option_to_posgresql(params["$filter"])
+            sta_opts["filter"] = sta_option_to_postgresql(params["$filter"])
 
         elif key == "$orderBy":
-            sta_opts["orderBy"] = "order by " + sta_option_to_posgresql(params["$orderBy"])
+            sta_opts["orderBy"] = "order by " + sta_option_to_postgresql(params["$orderBy"])
 
         elif key == "$expand":
             sta_opts["expand"] = params["$expand"]  # just propagate the expand value
 
     return sta_opts
+
+def generate_response(text, status=200, mimetype="application/json"):
+    """
+    Finals touch before sending the result, mainly replacing FROST url with our url
+    """
+    text = text.replace(sta_base_url, service_url)
+    return Response(text, status, mimetype=mimetype)
+
+@app.route('/<path:path>', methods=['GET'])
+def generic_query(path):
+    text, code = get_sta_request(request)
+    resp = json.loads(text)
+    return process_sensorthings_response(request, resp)
+
+@app.route('/', methods=['GET'])
+def generic():
+    rich.print("[purple]Regular query, forward to SensorThings API")
+    text, code = get_sta_request(request)
+    opts = process_sensorthings_options(request.args.to_dict())
+    return process_sensorthings_response(request, json.loads(text))
+
+@app.route('/Observations(<int:observation_id>)', methods=['GET'])
+def observations(observation_id):
+    """
+    Observations
+    """
+    try:
+        full_path = request.full_path
+        opts = process_sensorthings_options(request.args.to_dict())
+
+        log.info(f"Received Observations GET: {full_path}")
+        if observation_id < 1e10:
+            text, code = get_sta_request(request)
+            return process_sensorthings_response(request, json.loads(text), sta_opts=opts)
+        else:
+            datastream_id = int(observation_id / 1e10)
+            struct_time = time.localtime(observation_id - 1e10 * datastream_id)
+            timestamp = time.strftime('%Y-%m-%dT%H:%M:%Sz', struct_time)
+            filters = f"timestamp = '{timestamp}'"
+            data = db.get_raw_data(datastream_id, filters=filters, debug=True, format="list")[0]
+            observation = data_point_to_sensorthings(data, datastream_id, opts)
+            return generate_response(json.dumps(observation), 200, mimetype='application/json')
+    except SyntaxError as e:
+        error_message = {
+            "code": 400,
+            "type": "error",
+            "message": str(e)
+        }
+        return generate_response(json.dumps(error_message), 400, mimetype='application/json')
+
+
+@app.route('/Sensors(<int:sensor_id>)/Datastreams(<int:datastream_id>)/Observations', methods=['GET'])
+def sensors_datastreams_observations(sensor_id, datastream_id):
+    return datastreams_observations(datastream_id)
+
+@app.route('/Datastreams(<int:datastream_id>)', methods=['GET'])
+def just_datastreams(datastream_id):
+    rich.print(f"[green]Got a datastream request: {request.path}")
+    text, code = get_sta_request(request)
+    resp = json.loads(text)
+    return process_sensorthings_response(request, resp)
+
+@app.route('/Datastreams(<int:datastream_id>)/Observations', methods=['GET'])
+def datastreams_observations(datastream_id):
+    try:
+        opts = process_sensorthings_options(request.args.to_dict())
+        data_type, average = db.get_data_type(datastream_id)
+
+        # Averaged data is stored in regular "OBSERVATIONS" table, so it can be managed directly by SensorThings API
+        if average:
+            init = time.time()
+            text, code = get_sta_request(request)
+            d = json.loads(text)
+            if code < 300:
+                log.debug(f"{CYN} SensorThings query (with {len(d['value'])} points) took {time.time()-init:.03} sec{RST}")
+            return process_sensorthings_response(request, json.loads(text))
+
+        elif data_type == "timeseries":
+            init = time.time()
+            foi_id = db.datastream_fois[datastream_id]
+            pinit = time.time()
+            list_data = db.get_timeseries_data(datastream_id, top=opts["top"], skip=opts["skip"], debug=False, format="list",
+                                        filters=opts["filter"], orderby=opts["orderBy"])
+            log.debug(f"{CYN}Get data from database took {time.time() - pinit:.03} seconds{RST}")
+            text = data_list_to_sensorthings(list_data, foi_id, datastream_id, opts, data_type)
+            log.debug(
+                f"{CYN}Raw data query total time (with {len(list_data)} points) took {time.time() - init:.03} seconds{RST}")
+            return generate_response(json.dumps(text), status=200, mimetype='application/json')
+
+        elif data_type == "profiles":
+            init = time.time()
+            foi_id = db.datastream_fois[datastream_id]
+            pinit = time.time()
+            list_data = db.get_profiles_data(datastream_id, top=opts["top"], skip=opts["skip"], debug=False, format="list",
+                                        filters=opts["filter"], orderby=opts["orderBy"])
+            log.debug(f"{CYN}Get data from database took {time.time() - pinit:.03} seconds{RST}")
+            text = data_list_to_sensorthings(list_data, foi_id, datastream_id, opts, data_type)
+            log.debug(
+                f"{CYN}Raw data query total time (with {len(list_data)} points) took {time.time() - init:.03} seconds{RST}")
+            return generate_response(json.dumps(text), status=200, mimetype='application/json')
+        else:
+            rich.print(f"[red]unimplemented")
+            raise ValueError("unimplemented")
+
+    except SyntaxError as e:
+        error_message = {
+            "code": 400,
+            "type": "error",
+            "message": str(e)
+        }
+        return generate_response(json.dumps(error_message), 400, mimetype='application/json')
+
+    except psycopg2.errors.InFailedSqlTransaction as db_error:
+        log.error("psycopg2.errors.InFailedSqlTransaction" )
+        error_message = {
+            "code": 500,
+            "type": "error",
+            "message": f"Internal database connector error: {db_error}"
+        }
+        db.connection.rollback()
+        return generate_response(json.dumps(error_message), 500, mimetype='application/json')
+
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers.add('access-control-allow-origin', '*')
+    return response
 
 
 if __name__ == "__main__":
@@ -532,6 +585,6 @@ if __name__ == "__main__":
     log.info(f"SensorThings URL: {sta_base_url}")
 
     log.info("Setting up db connector")
-    db = SensorthingsDbConnector(db_host, db_port, db_name, db_user, db_password, log, raw_data_table=raw_data_table)
+    db = SensorthingsDbConnector(db_host, db_port, db_name, db_user, db_password, log)
     log.info("Getting sensor list...")
     app.run(host="0.0.0.0", debug=False, port=3000)

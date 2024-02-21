@@ -1,29 +1,37 @@
 # SensorThings TimeSeries #
 
 
-SensorThings TimeSeries is an API that is designed to complement the SensorThings API ([FROST Implementation](https://github.com/FraunhoferIOSB/FROST-Server)) with efficient storage for large amounts of time-series data with [TimescaleDB](https://timescaledb.com). SensorThings TimeSeries provides an API to access to data stored in a TimescaleDB hypertable called `raw_data` and returns it to the users.
+SensorThings TimeSeries is an API that is designed to complement the SensorThings API ([FROST Implementation](https://github.com/FraunhoferIOSB/FROST-Server)) with efficient storage for large amounts of time-series data with [TimescaleDB](https://timescaledb.com). SensorThings TimeSeries provides an API to access to data stored in several TimescaleDB hypertable called `timeseries`, `profiles` and `detections` and returns it to the users.
 
 The SensorThings TimeSeries API provides transparent access to SensorThings data, while adding support to access huge amount of timeseries data. This approach has the benefits of saving lots of hard drive space and to speed up queries retrieving great amounts of data.
 
 ```
-                ┌──────────────┐                   ┌──────────────────┐
-                │              │                   │                  │
-      o   ──────► SensorThings ├───────────────────► SensorThings API │
-     -|-        │  TimeSeires  │   regular queries │  (FROST Server)  │
-     / \        │              ├───┐   (http)      │                  │
-                └──────────────┘   │               └──────────────────┘
-   (user)                          │
-                                   │
-                                   │               ┌──────────────────┐
-                                   │               │ SensorThings DB  │
-                                   └───────────────► (PostgresQL +    │
-                                   queries with    │  TimescaleDB)    │
-                                   timeseries data └──────────────────┘
-                                   (postgresql)
+
+
+            ┌──────────────┐  regular queries  ┌──────────────────┐
+            │              │      (http)       │                  │
+  o   ──────► SensorThings ├───────────────────► SensorThings API │
+ -|-        │  TimeSeries  │                   │  (FROST Server)  │
+ / \        │              │                   │                  │
+            └──────┬───────┘                   └─────────┬────────┘
+user)              │                                     │
+                   │                                     │ (PG connection)
+                   │                                     │
+                   │                           ┌─────────O────────┐
+                   │     (PG connection)       │ SensorThings DB  │
+                   └───────────────────────────O (PostgresQL +    │
+                                               │  TimescaleDB)    │
+                          queries with         └──────────────────┘
+                          timeseries data
+                          (postgresql)
 
 
 ```
 
+Currently, there are 3 types of data:
+* **timeseries**: regular timeseries data. Each point has a timestamp and a quality control flag associated
+* **profiles**: depth-referenced data. Each data point has a timestamp, a depth (int) and a quality control flag associated
+* **detections**: class predictions from an AI-based object detection algorithm. Each data point is an integer value (number of instances detected) with an associated timestamp.
 
 ### Info ###
 

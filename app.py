@@ -556,22 +556,41 @@ def datastreams_observations_get(datastream_id):
 
 @app.route('/Datastreams(<int:datastream_id>)/Observations', methods=['POST'])
 def datastreams_observations_post(datastream_id):
+    data = json.loads(request.data.decode())
+    return observation_post_handler(data, datastream_id)
+
+@app.route('/Observations', methods=['POST'])
+def observations_post():
+    data = json.loads(request.data.decode())
+
+    keys = {
+        "Datastream/@iot.id": int,
+    }
     try:
-        opts = process_sensorthings_options(request.args.to_dict())
-        data_type, average = db.get_data_type(datastream_id)
-        # Averaged data is stored in regular "OBSERVATIONS" table, so it can be managed directly by SensorThings API
-        if average:
-            #
-            init = time.time()
-            text, code = get_sta_request(request)
-            d = json.loads(text)
-            if code < 300:
-                log.debug(f"{CYN} SensorThings query (with {len(d['value'])} points) took {time.time()-init:.03} sec{RST}")
-            return process_sensorthings_response(request, json.loads(text))
+        assert_dict(data, keys, verbose=True)
+    except AssertionError:
+        rich.print(f"[red]Could not find Datastream ID in Observation!")
+        return {"code": 400, "type": "error", "message": "Could not find Datastream ID in Observations! "}
 
-        # Process "special" data types (timeseries, profiles or detections)
-        data = json.loads(request.data.decode())
+    datastream_id = data["Datastream"]["@iot.id"]
+    data.pop("Datastream")
+    return observation_post_handler(data, datastream_id)
 
+def observation_post_handler(data: dict, datastream_id: int):
+    data_type, average = db.get_data_type(datastream_id)
+    # Averaged data is stored in regular "OBSERVATIONS" table, so it can be managed directly by SensorThings API
+    if average:
+        #
+        init = time.time()
+        text, code = get_sta_request(request)
+        d = json.loads(text)
+        if code < 300:
+            log.debug(f"{CYN} SensorThings query (with {len(d['value'])} points) took {time.time()-init:.03} sec{RST}")
+        return process_sensorthings_response(request, json.loads(text))
+
+    # Process "special" data types (timeseries, profiles or detections)
+
+    try:
         if data_type == "timeseries":
             errmsg = inject_timeseries(data, datastream_id)
         elif data_type == "profiles":
@@ -580,17 +599,9 @@ def datastreams_observations_post(datastream_id):
             errmsg = inject_detections(data, datastream_id)
         else:
             raise ValueError("Unimplemented")
-
-        if errmsg:  # manage errors
-            r = {"status": "error", "message": errmsg }
-            return generate_response(json.dumps(r), status=400, mimetype='application/json')
-
-        observation_url = generate_observation_url(data_type, datastream_id, data["resultTime"])
-        return generate_response("", status=200, mimetype='application/json', headers={"Location": observation_url})
-
-    except psycopg2.errors.InFailedSqlTransaction as db_error:
+    except psycopg2.errors.InFailedSqlTransaction as db_error:  # Handle DB errors
         rich.print(f"[red]")
-        log.error("psycopg2.errors.InFailedSqlTransaction" )
+        log.error("psycopg2.errors.InFailedSqlTransaction")
         error_message = {
             "code": 500,
             "type": "error",
@@ -598,6 +609,13 @@ def datastreams_observations_post(datastream_id):
         }
         db.connection.rollback()
         return generate_response(json.dumps(error_message), 500, mimetype='application/json')
+
+    if errmsg:  # manage errors (probably formatting)
+        r = {"status": "error", "message": errmsg }
+        return generate_response(json.dumps(r), status=400, mimetype='application/json')
+
+    observation_url = generate_observation_url(data_type, datastream_id, data["resultTime"])
+    return generate_response("", status=200, mimetype='application/json', headers={"Location": observation_url})
 
 
 def inject_timeseries(data: dict, datastream_id: int) -> str:

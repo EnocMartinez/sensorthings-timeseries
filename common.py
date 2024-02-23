@@ -163,7 +163,7 @@ def varname_from_datastream(ds_name):
     return varname
 
 
-def assert_dict(conf: dict, required_keys: dict, level="/", verbose=False):
+def assert_dict(conf: dict, required_keys: dict, verbose=False):
     """
     Checks if all the expected keys in a dictionary are there. The expected format is field name as key and type as
     value:
@@ -192,6 +192,12 @@ def assert_dict(conf: dict, required_keys: dict, level="/", verbose=False):
         # Check for nested dicts
         if "/" in key:
             parent, son = key.split("/")
+            if parent not in conf.keys():
+                msg =f"Required key \"{parent}\" not found!"
+                if verbose:
+                    rich.print(f"[red]{msg}")
+                raise AssertionError(msg)
+
             if type(conf[parent]) != dict:
                 msg = f"Value for key \"{parent}\" wrong type, expected type dict, but got {type(conf[parent])}"
                 if verbose:

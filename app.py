@@ -25,10 +25,11 @@ import logging
 import json
 import requests
 from flask import Flask, request, Response
+from flask_basicauth import BasicAuth
+from flask_cors import CORS
 from common import setup_log, SensorthingsDbConnector, assert_dict
 import time
 import psycopg2
-from flask_cors import CORS
 import os
 from common import GRN, BLU, MAG, CYN, WHT, YEL, RED, NRM, RST
 import rich
@@ -38,6 +39,7 @@ import datetime
 app = Flask("SensorThings TimeSeries")
 CORS(app)
 
+basic_auth = BasicAuth(app)
 
 def get_datastream_id(datastream: dict):
     """
@@ -555,11 +557,13 @@ def datastreams_observations_get(datastream_id):
 
 
 @app.route('/Datastreams(<int:datastream_id>)/Observations', methods=['POST'])
+@basic_auth.required
 def datastreams_observations_post(datastream_id):
     data = json.loads(request.data.decode())
     return observation_post_handler(data, datastream_id)
 
 @app.route('/Observations', methods=['POST'])
+@basic_auth.required
 def observations_post():
     data = json.loads(request.data.decode())
 
@@ -715,13 +719,15 @@ if __name__ == "__main__":
         dotenv.load_dotenv(args.environment)
 
     required_env_variables = ["STA_DB_HOST", "STA_DB_USER", "STA_DB_PORT", "STA_DB_PASSWORD", "STA_DB_NAME", "STA_URL",
-                              "STA_TS_ROOT_URL"]
+                              "STA_TS_ROOT_URL", "STA_TS_USER", "STA_TS_PASSWORD"]
 
     for key in required_env_variables:
         if key not in os.environ.keys():
             raise EnvironmentError(f"Environment variable '{key}' not set!")
 
     log = setup_log("API", logger_name="API", log_level="info")
+
+
 
     db_name = os.environ["STA_DB_NAME"]
     db_port = os.environ["STA_DB_PORT"]
@@ -730,6 +736,10 @@ if __name__ == "__main__":
     db_host = os.environ["STA_DB_HOST"]
     service_url = os.environ["STA_TS_ROOT_URL"]
     sta_base_url = os.environ["STA_URL"]
+
+
+    app.config['BASIC_AUTH_USERNAME'] = os.environ["STA_TS_USER"]
+    app.config['BASIC_AUTH_PASSWORD'] = os.environ["STA_TS_PASSWORD"]
 
     if "STA_TS_RAW_DATA_TABLE" not in os.environ.keys():
         raw_data_table = "raw_data"

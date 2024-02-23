@@ -8,7 +8,9 @@ and sends it back following the SensorThings API standard.
 Some of the things to be taken into account:
         -> there are no observation ID in raw data, but a primary key composed by timestamp and datastream_id
     -> To generate a unique identifier for each data point, the following formula is used:
-            observation_id = datastream_id * 1e10 + epoch_time
+            observation_id = datastream_id * 1e10 + epoch_time (timeseries)
+            observation_id = datastream_id * 2e10 + epoch_time (profiles)
+            observation_id = datastream_id * 3e10 + epoch_time (detections)
 
 
 author: Enoc Martínez
@@ -23,13 +25,15 @@ import logging
 import json
 import requests
 from flask import Flask, request, Response
-from common import setup_log, SensorthingsDbConnector
+from common import setup_log, SensorthingsDbConnector, assert_dict
 import time
 import psycopg2
 from flask_cors import CORS
 import os
 from common import GRN, BLU, MAG, CYN, WHT, YEL, RED, NRM, RST
 import rich
+import dotenv
+import datetime
 
 app = Flask("SensorThings TimeSeries")
 CORS(app)
@@ -425,12 +429,15 @@ def process_sensorthings_options(params: dict):
 
     return sta_opts
 
-def generate_response(text, status=200, mimetype="application/json"):
+def generate_response(text, status=200, mimetype="application/json", headers={}):
     """
     Finals touch before sending the result, mainly replacing FROST url with our url
     """
     text = text.replace(sta_base_url, service_url)
-    return Response(text, status, mimetype=mimetype)
+    response = Response(text, status, mimetype=mimetype)
+    for key, value in headers.items():
+        response.headers[key] = value
+    return response
 
 @app.route('/<path:path>', methods=['GET'])
 def generic_query(path):
@@ -477,7 +484,7 @@ def observations(observation_id):
 
 @app.route('/Sensors(<int:sensor_id>)/Datastreams(<int:datastream_id>)/Observations', methods=['GET'])
 def sensors_datastreams_observations(sensor_id, datastream_id):
-    return datastreams_observations(datastream_id)
+    return datastreams_observations_get(datastream_id)
 
 @app.route('/Datastreams(<int:datastream_id>)', methods=['GET'])
 def just_datastreams(datastream_id):
@@ -487,7 +494,7 @@ def just_datastreams(datastream_id):
     return process_sensorthings_response(request, resp)
 
 @app.route('/Datastreams(<int:datastream_id>)/Observations', methods=['GET'])
-def datastreams_observations(datastream_id):
+def datastreams_observations_get(datastream_id):
     try:
         opts = process_sensorthings_options(request.args.to_dict())
         data_type, average = db.get_data_type(datastream_id)
@@ -547,6 +554,132 @@ def datastreams_observations(datastream_id):
         return generate_response(json.dumps(error_message), 500, mimetype='application/json')
 
 
+@app.route('/Datastreams(<int:datastream_id>)/Observations', methods=['POST'])
+def datastreams_observations_post(datastream_id):
+    try:
+        opts = process_sensorthings_options(request.args.to_dict())
+        data_type, average = db.get_data_type(datastream_id)
+        # Averaged data is stored in regular "OBSERVATIONS" table, so it can be managed directly by SensorThings API
+        if average:
+            #
+            init = time.time()
+            text, code = get_sta_request(request)
+            d = json.loads(text)
+            if code < 300:
+                log.debug(f"{CYN} SensorThings query (with {len(d['value'])} points) took {time.time()-init:.03} sec{RST}")
+            return process_sensorthings_response(request, json.loads(text))
+
+        # Process "special" data types (timeseries, profiles or detections)
+        data = json.loads(request.data.decode())
+
+        if data_type == "timeseries":
+            errmsg = inject_timeseries(data, datastream_id)
+        elif data_type == "profiles":
+            errmsg = inject_profiles(data, datastream_id)
+        elif data_type == "detections":
+            errmsg = inject_detections(data, datastream_id)
+        else:
+            raise ValueError("Unimplemented")
+
+        if errmsg:  # manage errors
+            r = {"status": "error", "message": errmsg }
+            return generate_response(json.dumps(r), status=400, mimetype='application/json')
+
+        observation_url = generate_observation_url(data_type, datastream_id, data["resultTime"])
+        return generate_response("", status=200, mimetype='application/json', headers={"Location": observation_url})
+
+    except psycopg2.errors.InFailedSqlTransaction as db_error:
+        rich.print(f"[red]")
+        log.error("psycopg2.errors.InFailedSqlTransaction" )
+        error_message = {
+            "code": 500,
+            "type": "error",
+            "message": f"Internal database connector error: {db_error}"
+        }
+        db.connection.rollback()
+        return generate_response(json.dumps(error_message), 500, mimetype='application/json')
+
+
+def inject_timeseries(data: dict, datastream_id: int) -> str:
+    keys = {
+        "resultTime": str,
+        "result": float,
+        "resultQuality/qc_flag": int,
+    }
+    try:
+        assert_dict(data, keys, verbose=True)
+    except AssertionError as e:
+        rich.print(f"[red]Wrong data format! {e}")
+        err_msg = {
+            "code": 400,
+            "type": "error",
+            "message": "Profiles data not properly formatted! expected fields 'resultTime' (str), 'value' (float)," \
+                       " and 'resultQuality/qc_flag' (int)"
+        }
+        return err_msg
+
+    db.timescale.insert_to_timeseries(data["resultTime"], data["result"], data["resultQuality"]["qc_flag"],
+                                      datastream_id)
+    return ""  # success
+
+
+def inject_profiles(data, datastream_id):
+    rich.print("")
+    keys = {
+        "resultTime": str,
+        "result": float,
+        "parameters/depth": float,
+        "resultQuality/qc_flag": int,
+    }
+    try:
+        assert_dict(data, keys, verbose=True)
+    except AssertionError as e:
+        rich.print(f"[red]Wrong data format! {e}")
+        err_msg = {
+            "code": 400,
+            "type": "error",
+            "message": "Profiles data not properly formatted! expected fields 'resultTime' (str), 'value' (float)," \
+                       " 'parameters/depth' (float) and 'resultQuality/qc_flag' (int)"
+        }
+        return err_msg
+    db.timescale.insert_to_profiles(data["resultTime"], data["parameters"]["depth"], data["result"],
+                                    data["resultQuality"]["qc_flag"], datastream_id)
+
+    return ""  # success
+
+def inject_detections(data, datastream_id):
+    keys = {
+        "resultTime": str,
+        "result": int,
+    }
+    try:
+        assert_dict(data, keys, verbose=True)
+    except AssertionError as e:
+        rich.print(f"[red]Wrong data format! {e}")
+        err_msg = {
+            "code": 400,
+            "type": "error",
+            "message": "Detections data not properly formatted! expected fields 'resultTime' (str), 'value' (int)"
+        }
+        return err_msg
+
+    db.timescale.insert_to_detections(data["resultTime"], data["result"], datastream_id)
+    rich.print("data inserted!")
+    return ""  # success
+
+
+def generate_observation_url(data_type: str, datastream_id, timestamp):
+    data_type_digit = {
+        "timeseries": "1",
+        "profiles": "2",
+        "detections": "3"
+    }
+    prefix = data_type_digit[data_type]
+    t = datetime.datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ")
+    observation_id = int(1e10 * datastream_id + int(t.strftime("%s")))
+    return service_url + f"/Observations({prefix}{observation_id})"
+
+
 @app.after_request
 def add_cors_headers(response):
     response.headers.add('access-control-allow-origin', '*')
@@ -554,8 +687,18 @@ def add_cors_headers(response):
 
 
 if __name__ == "__main__":
+    argparser = ArgumentParser()
+    argparser.add_argument("-e", "--environment", help="File with environment variables", type=str, default="")
+    argparser.add_argument("-p", "--port", help="HTTP port", type=int, default=8082)
+
+    args = argparser.parse_args()
+
+    if args.environment:
+        dotenv.load_dotenv(args.environment)
+
     required_env_variables = ["STA_DB_HOST", "STA_DB_USER", "STA_DB_PORT", "STA_DB_PASSWORD", "STA_DB_NAME", "STA_URL",
                               "STA_TS_ROOT_URL"]
+
     for key in required_env_variables:
         if key not in os.environ.keys():
             raise EnvironmentError(f"Environment variable '{key}' not set!")
@@ -587,4 +730,4 @@ if __name__ == "__main__":
     log.info("Setting up db connector")
     db = SensorthingsDbConnector(db_host, db_port, db_name, db_user, db_password, log)
     log.info("Getting sensor list...")
-    app.run(host="0.0.0.0", debug=False, port=3000)
+    app.run(host="0.0.0.0", debug=False, port=args.port)

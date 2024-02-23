@@ -163,22 +163,54 @@ def varname_from_datastream(ds_name):
     return varname
 
 
-def assert_dict(conf: dict, required_keys: dict):
+def assert_dict(conf: dict, required_keys: dict, level="/", verbose=False):
     """
-    Checks if all the expected keys in a dictionary are there. The lists __required_keys and the dict __type are
-    required
+    Checks if all the expected keys in a dictionary are there. The expected format is field name as key and type as
+    value:
+        { "name": str, "importantNumber": int}
+
+    One level of nesting is supported:
+    value:
+        { "someData/nestedData": str}
+    expects something like
+        {
+        "someData": {
+            "nestedData": "hi"
+            }
+        }
+
     :param conf: dict with configuration to be checked
     :param required_keys: dictionary with required keys
     :raises: AssertionError if the input does not match required_keys
     """
     for key, expected_type in required_keys.items():
-        if key not in conf.keys():
+        if "/" in key:
+            pass
+        elif key not in conf.keys():
             raise AssertionError(f"Required key \"{key}\" not found in configuration")
 
-        value = conf[key]
+        # Check for nested dicts
+        if "/" in key:
+            parent, son = key.split("/")
+            if type(conf[parent]) != dict:
+                msg = f"Value for key \"{parent}\" wrong type, expected type dict, but got {type(conf[parent])}"
+                if verbose:
+                    rich.print(f"[red]{msg}")
+                raise AssertionError(msg)
+            if son not in conf[parent].keys():
+                msg =f"Required key \"{son}\" not found in configuration/{parent}"
+                if verbose:
+                    rich.print(f"[red]{msg}")
+                raise AssertionError(msg)
+            value = conf[parent][son]
+        else:
+            value = conf[key]
+
         if type(value) != expected_type:
-            raise AssertionError(f"Value for key \"{key}\" wring type, expected type {expected_type}, but got "
-                                 f"{type(value)}")
+            msg = f"Value for key \"{key}\" wrong type, expected type {expected_type}, but got '{type(value)}'"
+            if verbose:
+                rich.print(f"[red]{msg}")
+            raise AssertionError(msg)
 
 
 def reverse_dictionary(data):
@@ -255,7 +287,7 @@ class Connection:
         self.index = 0
         self.__closing = False
 
-    def run_query(self, query, description=False, debug=False):
+    def run_query(self, query, description=False, debug=False, fetch=True):
         """
         Executes a query and returns the result. If description=True the desription will also be returned
         """
@@ -264,12 +296,15 @@ class Connection:
             rich.print("[magenta]%s" % query)
         self.cursor.execute(query)
         self.connection.commit()
-        resp = self.cursor.fetchall()
-        self.available = True
-
-        if description:
-            return resp, self.cursor.description
-        return resp
+        if fetch:
+            resp = self.cursor.fetchall()
+            self.available = True
+            if description:
+                return resp, self.cursor.description
+            return resp
+        else:
+            self.available = True
+            return
 
     def close(self):
         if not self.__closing:
@@ -325,18 +360,20 @@ class PgDatabaseConnector(LoggerSuperclass):
         return self.new_connection()
 
 
-    def exec_query(self, query, description=False, debug=False):
+    def exec_query(self, query, description=False, debug=False, fetch=True):
         """
         Runs a query in a free connection
         """
         c = self.get_available_connection()
         results = None
         try:
-            results = c.run_query(query, description=description, debug=debug)
+            results = c.run_query(query, description=description, debug=debug, fetch=fetch)
         except Exception as e:
-            rich.print(f"[red]{e}")
+            rich.print(f"[red]Exception in exec_query {e}")
             try:
+                rich.print("[white]closing db connection due to exception")
                 c.close()
+                rich.print("[white]closed")
             except:  # ignore errors
                 pass
             self.connections.remove(c)
@@ -369,204 +406,6 @@ class PgDatabaseConnector(LoggerSuperclass):
     def close(self):
         for c in self.connections:
             c.close()
-
-
-class SensorthingsDbConnectorOld(PgDatabaseConnector, LoggerSuperclass):
-    def __init__(self, host, port, db_name, db_user, db_password, logger, keep_trying=True, timeseries_table="raw_data"):
-        """
-        initializes  DB connector specific for SensorThings API database (FROST implementation)
-        :param host:
-        :param port:
-        :param db_name:
-        :param db_user:
-        :param db_password:
-        :param logger:
-        """
-        PgDatabaseConnector.__init__(self, host, port, db_name, db_user, db_password, logger)
-        rich.print(f"[cyan]{host}:{port}")
-        LoggerSuperclass.__init__(self, logger, "STA DB")
-        self.info("Initialize database connector...")
-
-        # Table names
-        self.timeseries_table = "timeseries"
-        self.profiles_table = "profiles"
-
-        self.__sensor_properties = {}
-
-        # dictionaries where sensors key is name and value is ID
-        while keep_trying:
-            try:
-                self.sensor_ids = self.get_sensors()
-                self.datastreams_ids = self.get_datastream_names()
-                self.obs_properties_ids = self.get_obs_properties()
-                self.things_ids = self.get_things()
-                self.datastream_fois = self.get_datastream_fois()
-                self.foi_datastream = reverse_dictionary(self.datastream_fois)
-
-                keep_trying = False
-            except ConnectionError as e:
-                self.error("Can't access database, trying again in 10s")
-                time.sleep(10)
-
-        # dictionaries where key is ID and value is name
-        self.sensor_names = reverse_dictionary(self.sensor_ids)
-        self.datastream_names = reverse_dictionary(self.datastreams_ids)
-        self.things_names = reverse_dictionary(self.things_ids)
-        self.obs_properties_names = reverse_dictionary(self.obs_properties_ids)
-
-        self.datastream_properties = self.get_datastream_properties()
-
-    def get_data_type(self, datastream_id: int) -> (str, bool):
-        """
-        Return info about the datastream data type in two fields: data type and average. Data type can be
-        "timeseries", "profile", "files" or "detections". The average is a boolean
-        :param datastream_id: int id of the datastream
-        :return: tuple (dataType, average) [str, bool]
-        """
-        properties = self.datastream_properties[datastream_id]
-        data_type = properties["dataType"]
-        averaged = False
-        if "averagePeriod" in properties.keys():
-            averaged = True
-        return data_type, averaged
-
-    def get_sensors(self):
-        """
-        Returns a dictionary with sensor's names and their id, e.g. {"SBE37": 3, "AWAC": 5}
-        :return: dictionary
-        """
-        df = self.dataframe_from_query('select "ID", "NAME" from "SENSORS";')
-        return dataframe_to_dict(df, "NAME", "ID")
-
-    def get_things(self):
-        """
-        Returns a dictionary with sensor's names and their id, e.g. {"SBE37": 3, "AWAC": 5}
-        :return: dictionary
-        """
-        df = self.dataframe_from_query('select "ID", "NAME" from "THINGS";')
-        return dataframe_to_dict(df, "NAME", "ID")
-
-    def get_datastream_names(self, fields=["ID", "NAME"]):
-        select_fields = f'"{fields[0]}"'
-        for f in fields[1:]:
-            select_fields += f', "{f}"'
-
-        df = self.dataframe_from_query(f'select {select_fields} from "DATASTREAMS";')
-        return dataframe_to_dict(df, "NAME", "ID")
-
-    def get_datastream_properties(self, fields=["ID", "PROPERTIES"]):
-        select_fields = f'"{fields[0]}"'
-        for f in fields[1:]:
-            select_fields += f', "{f}"'
-
-        df = self.dataframe_from_query(f'select {select_fields} from "DATASTREAMS";')
-        return dataframe_to_dict(df, "ID", "PROPERTIES")
-
-    def get_obs_properties(self):
-        df = self.dataframe_from_query('select "ID", "NAME" from "OBS_PROPERTIES";')
-        return dataframe_to_dict(df, "NAME", "ID")
-
-    def get_datastream_fois(self):
-        """
-        Generates a dictionary with key datastream_id and value foi_id. Only valid for FOIs generated via location
-        :return:
-        """
-        query = (f'select "FEATURES"."ID" as foi_id, "THINGS"."ID" as thing_id '
-                 f'FROM "THINGS", "FEATURES" '
-                 f'where  "THINGS"."NAME" = "FEATURES"."NAME";')
-        fois = self.dataframe_from_query(query)
-        datastreams = self.dataframe_from_query('select "ID" as datastream_id, "NAME", "THING_ID" from "DATASTREAMS";')
-
-        datastream_fois = {}
-        for _, row in datastreams.iterrows():
-            thing_id = row["THING_ID"]
-            datastream_id = row["datastream_id"]
-            foi_id = fois[fois["thing_id"] == thing_id]["foi_id"].values[0]  # select foi_id where things match
-            datastream_fois[datastream_id] = foi_id
-        return datastream_fois
-
-    def get_timeseries_data(self, identifier, time_start="", time_end="", top=100, skip=0, ascending=True, debug=False,
-                     format="dataframe", filters="", orderby=""):
-        """
-        Access the raw data table and exports all data between time_start and time_end
-        :param identifier: datastream name (str) or datastream id (int)
-        :param time_start: start time
-        :param time_end: end time (not included)
-        """
-        if type(identifier) == int:
-            pass
-        elif type(identifier) == str:  # if string, convert from name to ID
-            identifier = self.datastreams_ids[identifier]
-        query = f"select timestamp, value, qc_flag from {self.timeseries_table} where datastream_id = {identifier}"
-
-        if filters:
-            query += f" and {filters} "  # add custom filters
-        if time_start:
-            query += f" and timestamp >= '{time_start}'"
-        if time_end:
-            query += f" and timestamp <'{time_end}'"
-        if orderby:
-            query += f" {orderby}"
-        else:
-            if ascending:
-                query += " order by timestamp asc"
-            else:
-                query += " order by timestamp desc"
-
-        query = f"select * from ({query}) as e"
-        if skip:
-            query += f" offset {skip}"
-
-        query += f" limit {top};"
-
-        if format == "dataframe":
-            df = self.dataframe_from_query(query, debug=debug)
-            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-            return df.set_index("timestamp")
-        elif format == "list":
-            return self.list_from_query(query, debug=debug)
-        else:
-            raise ValueError(f"format {format} not valid!")
-
-    def get_profiles_data(self, identifier, time_start="", time_end="", top=100, skip=0, ascending=True, debug=False,
-                          format="dataframe", filters="", orderby=""):
-        """
-        Access the raw data table and exports all data between time_start and time_end
-        :param identifier: datastream name (str) or datastream id (int)
-        :param time_start: start time
-        :param time_end: end time (not included)
-        """
-        if type(identifier) == int:
-            pass
-        elif type(identifier) == str:  # if string, convert from name to ID
-            identifier = self.datastreams_ids[identifier]
-        query = f"select timestamp, depth, value, qc_flag from {self.profiles_table} where datastream_id = {identifier}"
-
-        if filters:
-            query += f" and {filters} "  # add custom filters
-        if time_start:
-            query += f" and timestamp >= '{time_start}'"
-        if time_end:
-            query += f" and timestamp <'{time_end}'"
-        if orderby:
-            query += f" {orderby}"
-        else:
-            if ascending:
-                query += " order by timestamp asc"
-            else:
-                query += " order by timestamp desc"
-        query = f"select * from ({query}) as e"
-        if skip:
-            query += f" offset {skip}"
-        query += f" limit {top};"
-        if format == "dataframe":
-            df = self.dataframe_from_query(query, debug=debug)
-            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-            return df.set_index("timestamp")
-        elif format == "list":
-            return self.list_from_query(query, debug=debug)
-        else:
-            raise ValueError(f"format {format} not valid!")
 
 
 class SensorthingsDbConnector(PgDatabaseConnector, LoggerSuperclass):
@@ -939,7 +778,16 @@ class SensorthingsDbConnector(PgDatabaseConnector, LoggerSuperclass):
             return True
         return False
 
-
+    def get_data_type(self, datastream_id):
+        """
+        Returns the data type of a datastream
+        :param datastream_id: (int) id of the datastream
+        :returns: (data_type: str, average: bool)
+        """
+        props = self.datastream_properties[datastream_id]
+        data_type = props["dataType"]
+        average = not props["fullData"]
+        return data_type, average
 
 
 class TimescaleDB(LoggerSuperclass):
@@ -1017,7 +865,7 @@ class TimescaleDB(LoggerSuperclass):
         query = """
         CREATE TABLE {table_name} (
         timestamp TIMESTAMPTZ NOT NULL,
-        depth smallint,
+        depth DOUBLE PRECISION NOT NULL,
         value DOUBLE PRECISION NOT NULL,   
         qc_flag INT8,
         datastream_id smallint NOT NULL,
@@ -1095,6 +943,34 @@ class TimescaleDB(LoggerSuperclass):
         else:
             ratio = bytes_before / bytes_after
             return round(bytes_before / 1e6, 2), round(bytes_after / 1e6, 2), round(ratio, 2)
+
+    def insert_to_timeseries(self,  timestamp: str, value: float, qc_flag: int, datastream_id: int):
+        """
+        Insert a single data point into the timeseries hypertable
+        """
+        query = f"insert into timeseries (timestamp, value, qc_flag, datastream_id) VALUES('{timestamp}', " \
+                f"{value}, {qc_flag}, {datastream_id})"
+        self.db.exec_query(query, fetch=False)
+        pass
+
+
+    def insert_to_profiles(self, timestamp: str, depth: float, value: float, qc_flag: int, datastream_id: int, depth_precision=2):
+        """
+        Insert a single data point into the profiles hypertable
+        """
+        depth = round(float(depth), depth_precision)
+        query = f"insert into profiles (timestamp, depth, value, qc_flag, datastream_id) " \
+                 f"VALUES('{timestamp}', {depth}, {value}, {qc_flag}, {datastream_id})"
+        self.db.exec_query(query, fetch=False)
+
+    def insert_to_detections(self, timestamp: str, value: int, datastream_id: int):
+        """
+        Insert a single data point into the timeseries hypertable
+        """
+        query = f"insert into timeseries (timestamp, value, datastream_id) VALUES('{timestamp}', " \
+                f"{value},{datastream_id})"
+        self.db.exec_query(query, fetch=False)
+        pass
 
 
 if __name__ == "__main__":

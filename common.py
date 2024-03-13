@@ -7,6 +7,7 @@ email: enoc.martinez@upc.edu
 license: MIT
 created: 28/03/2022
 """
+import traceback
 from threading import Thread, Event
 import logging
 from logging.handlers import TimedRotatingFileHandler
@@ -374,7 +375,16 @@ class PgDatabaseConnector(LoggerSuperclass):
         results = None
         try:
             results = c.run_query(query, description=description, debug=debug, fetch=fetch)
+
+        except psycopg2.errors.UniqueViolation as e:
+            # most likely a duplicated key, raise it again
+            c.connection.rollback()
+            c.available = True  # set it to available
+            rich.print(f"[yellow]{traceback.format_exc()}")
+            raise e
+
         except Exception as e:
+            rich.print(f"[yellow]{traceback.format_exc()}")
             rich.print(f"[red]Exception in exec_query {e}")
             try:
                 rich.print("[white]closing db connection due to exception")
@@ -382,6 +392,7 @@ class PgDatabaseConnector(LoggerSuperclass):
                 rich.print("[white]closed")
             except:  # ignore errors
                 pass
+            rich.print(f"[red]REMOVING CONNECTION")
             self.connections.remove(c)
         return results
 
@@ -454,6 +465,47 @@ class SensorthingsDbConnector(PgDatabaseConnector, LoggerSuperclass):
         self.thing_name_id = reverse_dictionary(self.thing_id_name)
         self.obs_prop_id_name = reverse_dictionary(self.obs_prop_name_id)
         self.datastream_properties = self.get_datastream_properties()
+
+        # Get the list of current constraints
+        self.pg_constraints = self.list_from_query(f"select conname from pg_constraint;")
+
+
+        # Create unique name constrain in Datastreams, Sensors, Things, FeaturesOfInterest, Obseerve
+        self.add_unique_name_constraints()
+        self.add_unique_observation_constraint()
+
+        # TODO: Instead of a unique constraint for OBSERVATION, add these two index
+        # /*CREATE UNIQUE INDEX observations_unique_time_datastream_idx ON "OBSERVATIONS" ("PHENOMENON_TIME_START", "DATASTREAM_ID") WHERE  "PARAMETERS" IS NULL;
+        # CREATE UNIQUE INDEX observations_unique_time_datastream_param_idx ON "OBSERVATIONS" ("PHENOMENON_TIME_START", "DATASTREAM_ID", "PARAMETERS") WHERE  "PARAMETERS" IS NOT NULL;*/
+
+    def add_unique_name_constraints(self):
+        __unique_list = ["DATASTREAMS", "SENSORS", "THINGS", "FEATURES", "OBS_PROPERTIES"]
+        for table in __unique_list:
+            # First, check if it already exists
+            constraint_name = table.lower() + "_unique_name"
+            constraint_query = f"alter table \"{table}\" add constraint {constraint_name} unique (\"NAME\")"
+            self.add_constraint(constraint_name, constraint_query)
+
+    def add_unique_observation_constraint(self):
+        """
+        Adds unique index to OBSERVATIONS table to avoid duplicated measures. Two indexes are created, one for
+        regular data when parameters=null, and another one for profiles (parameters!=null).
+        """
+        q = 'CREATE UNIQUE INDEX observations_unique_time_datastream_idx ON "OBSERVATIONS" ("PHENOMENON_TIME_START", "DATASTREAM_ID") WHERE  "PARAMETERS" IS NULL;'
+        self.add_constraint("observations_unique_time_datastream_idx", q)
+        q = 'CREATE UNIQUE INDEX observations_unique_time_datastream_param_idx ON "OBSERVATIONS" ("PHENOMENON_TIME_START", "DATASTREAM_ID", "PARAMETERS") WHERE  "PARAMETERS" IS NOT NULL;'
+        self.add_constraint("observations_unique_time_datastream_param_idx", q)
+
+    def add_constraint(self, constraint_name, query):
+        """
+        Checks if a constraint is already present in pg_constraint table. If not, create it using the query
+        """
+        if constraint_name not in self.pg_constraints:
+            self.exec_query(query, fetch=False)
+            self.pg_constraints.append(constraint_name)
+        else:
+            self.info(f"Constraint {constraint_name} already exists!")
+
 
     def sensor_var_from_datastream(self, datastream_id):
         """
@@ -792,7 +844,10 @@ class SensorthingsDbConnector(PgDatabaseConnector, LoggerSuperclass):
         """
         props = self.datastream_properties[datastream_id]
         data_type = props["dataType"]
-        average = not props["fullData"]
+        if "averagePeriod" in props.keys():
+            average = True
+        else:
+            average = False
         return data_type, average
 
 
@@ -831,7 +886,8 @@ class TimescaleDB(LoggerSuperclass):
         if not self.db.check_if_table_exists(detections_table):
             self.info(f"TimescaleDB, initializing {detections_table} as a hypertable")
             self.create_detections_hypertable(detections_table, chunk_interval_time=default_interval)
-            self.add_compression_policy(profiles_table, policy="30d")
+            self.add_compression_policy(detections_table, policy="30d")
+
 
     def create_timeseries_hypertable(self, name, chunk_interval_time="30days"):
         """
@@ -854,7 +910,7 @@ class TimescaleDB(LoggerSuperclass):
             ON DELETE CASCADE
         );""".format(table_name=name)
         self.info(f"creating table '{name}'...")
-        self.db.exec_query(query)
+        self.db.exec_query(query, fetch=False)
         self.info("converting to hypertable...")
         query = f"SELECT create_hypertable('{name}', 'timestamp', 'datastream_id', 4, " \
                 f"chunk_time_interval => INTERVAL '{chunk_interval_time}');"
@@ -882,7 +938,7 @@ class TimescaleDB(LoggerSuperclass):
             ON DELETE CASCADE
         );""".format(table_name=name)
         self.info("creating table...")
-        self.db.exec_query(query)
+        self.db.exec_query(query, fetch=False)
         self.info("converting to hypertable...")
         query = f"SELECT create_hypertable('{name}', 'timestamp', 'datastream_id', 4, " \
                 f"chunk_time_interval => INTERVAL '{chunk_interval_time}');"
@@ -899,7 +955,7 @@ class TimescaleDB(LoggerSuperclass):
         query = """
         CREATE TABLE {table_name} (
         timestamp TIMESTAMPTZ NOT NULL,
-        count smallint,                
+        value smallint NOT NULL,
         datastream_id smallint NOT NULL,
         CONSTRAINT {table_name}_pkey PRIMARY KEY (timestamp, datastream_id),        
         CONSTRAINT "{table_name}_datastream_id_fkey" FOREIGN KEY (datastream_id)
@@ -908,7 +964,7 @@ class TimescaleDB(LoggerSuperclass):
             ON DELETE CASCADE
         );""".format(table_name=name)
         self.info("creating table...")
-        self.db.exec_query(query)
+        self.db.exec_query(query, fetch=False)
         self.info("converting to hypertable...")
         query = f"SELECT create_hypertable('{name}', 'timestamp', 'datastream_id', 4, " \
                 f"chunk_time_interval => INTERVAL '{chunk_interval_time}');"
@@ -921,7 +977,7 @@ class TimescaleDB(LoggerSuperclass):
 
         query = f"ALTER TABLE {table_name} SET (timescaledb.compress, timescaledb.compress_orderby = " \
                 "'timestamp DESC', timescaledb.compress_segmentby = 'datastream_id');"
-        self.db.exec_query(query)
+        self.db.exec_query(query, fetch=False)
         query = f"SELECT add_compression_policy('{table_name}', INTERVAL '{policy}', if_not_exists=>True); "
         self.db.exec_query(query)
 
@@ -956,8 +1012,11 @@ class TimescaleDB(LoggerSuperclass):
         """
         query = f"insert into timeseries (timestamp, value, qc_flag, datastream_id) VALUES('{timestamp}', " \
                 f"{value}, {qc_flag}, {datastream_id})"
-        self.db.exec_query(query, fetch=False)
-        pass
+        try:
+            self.db.exec_query(query, fetch=False)
+        except psycopg2.errors.UniqueViolation as e:
+            return str(e)
+        return None
 
 
     def insert_to_profiles(self, timestamp: str, depth: float, value: float, qc_flag: int, datastream_id: int, depth_precision=2):
@@ -965,18 +1024,25 @@ class TimescaleDB(LoggerSuperclass):
         Insert a single data point into the profiles hypertable
         """
         depth = round(float(depth), depth_precision)
-        query = f"insert into profiles (timestamp, depth, value, qc_flag, datastream_id) " \
+        query = f"insert into profiles (timestamp, depth, value, datastream_id) " \
                  f"VALUES('{timestamp}', {depth}, {value}, {qc_flag}, {datastream_id})"
-        self.db.exec_query(query, fetch=False)
+        try:
+            self.db.exec_query(query, fetch=False)
+        except psycopg2.errors.UniqueViolation as e:
+            return str(e)
+        return None
 
     def insert_to_detections(self, timestamp: str, value: int, datastream_id: int):
         """
         Insert a single data point into the timeseries hypertable
         """
-        query = f"insert into timeseries (timestamp, value, datastream_id) VALUES('{timestamp}', " \
+        query = f"insert into detections (timestamp, value, datastream_id) VALUES('{timestamp}', " \
                 f"{value},{datastream_id})"
-        self.db.exec_query(query, fetch=False)
-        pass
+        try:
+            self.db.exec_query(query, fetch=False)
+        except psycopg2.errors.UniqueViolation as e:
+            return str(e)
+        return None
 
 
 if __name__ == "__main__":

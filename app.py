@@ -192,6 +192,8 @@ def process_sensorthings_response(request, resp: json, mimetype="aplication/json
     """
     process the resopnse and checks if further actions are needed (e.g. expand raw data).
     """
+    if not resp:
+        resp = {}
     opts = process_sensorthings_options(request.args.to_dict())
     if "expand" in opts.keys():
         parent, key, expand_opts = process_url_with_expand(request.full_path, opts)
@@ -223,6 +225,14 @@ def get_sta_request(request):
     log.debug(f"[blue]Generic query, fetching {sta_url}")
     resp = requests.get(sta_url)
     rich.print(f"[yellow]Getting STA: {sta_url}")
+    code = resp.status_code
+    text = resp.text.replace(sta_base_url, service_url)  # hide original URL
+    return text, code
+
+def post_sta_request(request):
+    sta_url = f"{sta_base_url}{request.full_path}"
+    log.debug(f"[cyan]Generic query, fetching {sta_url}")
+    resp = requests.post(sta_url, request.data, headers=request.headers)
     code = resp.status_code
     text = resp.text.replace(sta_base_url, service_url)  # hide original URL
     return text, code
@@ -582,27 +592,34 @@ def observations_post():
 
 def observation_post_handler(data: dict, datastream_id: int):
     data_type, average = db.get_data_type(datastream_id)
-    # Averaged data is stored in regular "OBSERVATIONS" table, so it can be managed directly by SensorThings API
-    if average:
-        #
+    # Averaged data and files are stored in regular "OBSERVATIONS" table, so it can be managed directly by SensorThings API
+    if average or data_type not in ["timeseries", "profiles", "detections"]:
+        rich.print("[purple]Forward Observation to FROST")
         init = time.time()
-        text, code = get_sta_request(request)
-        d = json.loads(text)
+        _, code = post_sta_request(request)
         if code < 300:
-            log.debug(f"{CYN} SensorThings query (with {len(d['value'])} points) took {time.time()-init:.03} sec{RST}")
-        return process_sensorthings_response(request, json.loads(text))
+            log.debug(f"{CYN} SensorThings query took {time.time()-init:.03} sec{RST}")
+        # no text in FROST response
+        return process_sensorthings_response(request, {})
 
     # Process "special" data types (timeseries, profiles or detections)
 
     try:
         if data_type == "timeseries":
+            rich.print("[cyan]Inject to Timeseries")
             errmsg = inject_timeseries(data, datastream_id)
         elif data_type == "profiles":
+            rich.print("[white]Inject to Profiles")
             errmsg = inject_profiles(data, datastream_id)
         elif data_type == "detections":
+            rich.print("[green]Inject to Detections")
             errmsg = inject_detections(data, datastream_id)
         else:
-            raise ValueError("Unimplemented")
+            raise ValueError(f"This should never ever happen!   ")
+    except psycopg2.errors.UniqueViolation as e:
+        # unique key violated, we're fine, it's the users fault!
+        log.error("Unique violation error: {str(e)}")
+        pass
     except psycopg2.errors.InFailedSqlTransaction as db_error:  # Handle DB errors
         rich.print(f"[red]")
         log.error("psycopg2.errors.InFailedSqlTransaction")
@@ -615,10 +632,13 @@ def observation_post_handler(data: dict, datastream_id: int):
         return generate_response(json.dumps(error_message), 500, mimetype='application/json')
 
     if errmsg:  # manage errors (probably formatting)
-        r = {"status": "error", "message": errmsg }
+        r = {"status": "error", "message": errmsg.replace("\"", "") }
+        rich.print(f"[red]Insertion to datastream={datastream_id} failed!!")
+        rich.print(f"[red]{errmsg}")
         return generate_response(json.dumps(r), status=400, mimetype='application/json')
 
     observation_url = generate_observation_url(data_type, datastream_id, data["resultTime"])
+    rich.print(f"[green]Insertion to datastream={datastream_id} finished!")
     return generate_response("", status=200, mimetype='application/json', headers={"Location": observation_url})
 
 
@@ -640,9 +660,9 @@ def inject_timeseries(data: dict, datastream_id: int) -> str:
         }
         return err_msg
 
-    db.timescale.insert_to_timeseries(data["resultTime"], data["result"], data["resultQuality"]["qc_flag"],
+    return db.timescale.insert_to_timeseries(data["resultTime"], data["result"], data["resultQuality"]["qc_flag"],
                                       datastream_id)
-    return ""  # success
+
 
 
 def inject_profiles(data, datastream_id):
@@ -664,10 +684,9 @@ def inject_profiles(data, datastream_id):
                        " 'parameters/depth' (float) and 'resultQuality/qc_flag' (int)"
         }
         return err_msg
-    db.timescale.insert_to_profiles(data["resultTime"], data["parameters"]["depth"], data["result"],
+    return db.timescale.insert_to_profiles(data["resultTime"], data["parameters"]["depth"], data["result"],
                                     data["resultQuality"]["qc_flag"], datastream_id)
 
-    return ""  # success
 
 def inject_detections(data, datastream_id):
     keys = {
@@ -685,9 +704,8 @@ def inject_detections(data, datastream_id):
         }
         return err_msg
 
-    db.timescale.insert_to_detections(data["resultTime"], data["result"], datastream_id)
-    rich.print("data inserted!")
-    return ""  # success
+    return db.timescale.insert_to_detections(data["resultTime"], data["result"], datastream_id)
+
 
 
 def generate_observation_url(data_type: str, datastream_id, timestamp):
